@@ -88,6 +88,9 @@ def _build_prompt(text, source_hint):
         "- If only a monthly price OR only a price-per-sqft is given, still only fill in the one you can "
         "read directly from the source — do not calculate the other yourself.\n"
         "- \"Area\" is the neighbourhood/district name if given (e.g. \"Mayfair\", \"Fitzrovia\").\n"
+        "- \"Contacts\" should list every named contact/broker/agent for that listing, comma-separated "
+        "(e.g. \"Kieran Christie, Sophie Haugh, Nicki Mayle\") — however many are actually given, not "
+        "just one or two.\n"
         "- \"Special Features\" can combine any descriptive text that doesn't fit another field.\n"
         '- If the document has no office-listing data at all, return {"source_name": "", "listings": []}.\n\n'
         f"Source file hint: {source_hint or 'unknown'}\n\n"

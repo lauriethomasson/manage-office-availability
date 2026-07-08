@@ -19,8 +19,7 @@ COLUMNS = [
     "State of Space",
     "Legal Structure",
     "Broker Fee",
-    "Contact 1",
-    "Contact 2",
+    "Contacts",
     "Floor Plan",
     "High Res Images",
 ]

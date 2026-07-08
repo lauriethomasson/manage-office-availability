@@ -66,10 +66,13 @@ parser added to `extraction/rules/`.
 ## Target schema
 
 Each spreadsheet's columns were derived from the example output (`Kitt's
-Availability... .pdf`) — see `extraction/schema.py`. The two "Contact"
-columns are a naming assumption (the source PDF had a single merged
-header, "Please reach out to the team assigned to this space", over two
-name columns with no sub-header text of their own).
+Availability... .pdf`) — see `extraction/schema.py`. The "Contacts"
+column holds every identified contact for that listing/source,
+comma-separated, however many there are (not capped at a fixed number) —
+the source PDF had a single merged header, "Please reach out to the team
+assigned to this space", over what happened to be two name columns with
+no sub-header text of their own, but other sources (e.g. MetSpace) list
+three.
 
 ## Adding a new source
 

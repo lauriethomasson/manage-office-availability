@@ -38,16 +38,12 @@ def parse(content):
     header, rows = table[0], table[1:]
     col_map = _map_columns(header)
 
-    # "Contact 1"/"Contact 2": Kitt's-style sheets have one merged header
-    # ("...team assigned to this space") over two name columns with no
-    # sub-header text of their own — claim the first two unmapped columns
-    # that sit to the right of "Broker Fee" (or, failing that, the last two
-    # unmapped columns before any link-ish trailing columns).
+    # "Contacts": Kitt's-style sheets have one merged header ("...team
+    # assigned to this space") over several name columns with no
+    # sub-header text of their own — claim whichever unmapped columns sit
+    # to the right of "Broker Fee" (or, failing that, whatever's left
+    # unmapped) as contact columns, however many there are.
     contact_cols = _guess_contact_columns(header, col_map)
-    if contact_cols:
-        col_map[contact_cols[0]] = "Contact 1"
-        if len(contact_cols) > 1:
-            col_map[contact_cols[1]] = "Contact 2"
 
     records = []
     for row in rows:
@@ -57,6 +53,10 @@ def parse(content):
         for idx, col_name in col_map.items():
             if idx < len(row):
                 record[col_name] = row[idx]
+        if contact_cols:
+            names = [row[i].strip() for i in contact_cols if i < len(row) and row[i] and row[i].strip()]
+            if names:
+                record["Contacts"] = ", ".join(names)
         if record.get("Building") or record.get("Area"):
             records.append(record)
     return records
@@ -92,10 +92,11 @@ def _guess_contact_columns(header, col_map):
     unmapped = [i for i in range(len(header)) if i not in mapped_idxs]
     if not unmapped:
         return []
-    # Prefer unmapped columns that come after Broker Fee, if we found one.
+    # Prefer unmapped columns that come after Broker Fee, if we found one —
+    # take all of them, since a source might list any number of contacts.
     broker_idx = next((i for i, c in col_map.items() if c == "Broker Fee"), None)
     if broker_idx is not None:
         after = [i for i in unmapped if i > broker_idx]
-        if len(after) >= 2:
-            return after[:2]
-    return unmapped[:2]
+        if after:
+            return after
+    return unmapped

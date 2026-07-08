@@ -83,7 +83,7 @@ def parse(content):
                     "Desks (max)": _max_desks(desks_desc),
                     "Marketing Price (Based on Min Term) PCM": price_val.replace("£", "").replace(",", ""),
                     "Special Features": desks_desc,
-                    "Contact 1": contact,
+                    "Contacts": contact,
                 }
             )
             i += 4  # consumed Sqft, Desks, Price, and Av lines
