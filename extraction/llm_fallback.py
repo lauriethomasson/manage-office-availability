@@ -38,7 +38,7 @@ def extract_with_llm(text, source_hint=""):
 
     try:
         from google import genai
-        from google.genai import errors, types
+        from google.genai import types
     except ImportError:
         raise LLMExtractionError("The 'google-genai' package is not installed — run: pip install -r requirements.txt")
 
@@ -65,17 +65,33 @@ def extract_with_llm(text, source_hint=""):
                 thinking_config=types.ThinkingConfig(thinking_level="low"),
             ),
         )
-    except errors.APIError as e:
-        if getattr(e, "code", None) in (401, 403):
-            raise LLMExtractionError(
-                f"Gemini API rejected the API key ({e.code} — {getattr(e, 'message', e)}). "
-                "GEMINI_API_KEY is set but its value isn't a valid, active key — check it's "
-                "copied from https://aistudio.google.com/apikey with no surrounding quotes or "
-                "whitespace, and that it hasn't been revoked."
-            )
-        raise LLMExtractionError(f"Gemini API call failed: {e}")
     except Exception as e:
-        raise LLMExtractionError(f"Gemini API call failed: {e}")
+        # Check for an auth/permission failure defensively (by status code,
+        # not by exception class) — a previous version only caught
+        # google.genai.errors.APIError specifically, which turned out not
+        # to match whatever's actually being raised for this failure mode,
+        # so it silently fell through to the generic message below every
+        # time. Always include the real exception's type in that generic
+        # message now, so if this still doesn't match, the next occurrence
+        # tells us exactly what to catch instead of us guessing again.
+        code = getattr(e, "code", None) or getattr(e, "status_code", None)
+        err_text = str(e)
+        is_auth_error = (
+            code in (401, "401", 403, "403")
+            or "UNAUTHENTICATED" in err_text
+            or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in err_text
+            or "PERMISSION_DENIED" in err_text
+        )
+        if is_auth_error:
+            raise LLMExtractionError(
+                f"Gemini API rejected the request as unauthenticated "
+                f"({code if code else 'no code attribute'} — {getattr(e, 'message', None) or e}). "
+                "This is not necessarily GEMINI_API_KEY being wrong — it can also mean "
+                "something is causing the client to attempt OAuth/ADC auth instead of "
+                "using the key. Check aistudio.google.com/apikey for the key's validity, "
+                "and rule out any Google Cloud-related env vars."
+            )
+        raise LLMExtractionError(f"Gemini API call failed [{type(e).__module__}.{type(e).__name__}]: {e}")
 
     raw = response.text or ""
     records, source_name = _parse_and_validate(raw)
