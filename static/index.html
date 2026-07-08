@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Office Availability Consolidator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>Office Availability Consolidator</h1>
+  <p class="sub">Drop broker files below to extract listings into one master spreadsheet.</p>
+
+  <div id="dropzone" class="dropzone">
+    <p>Drag &amp; drop files here, or click to browse</p>
+    <p class="hint">PDF · DOCX · XLSX · CSV · EML · HTML</p>
+    <input type="file" id="fileInput" multiple hidden
+           accept=".pdf,.docx,.xlsx,.xls,.csv,.eml,.html,.htm">
+  </div>
+
+  <ul id="fileList" class="file-list"></ul>
+
+  <div class="mode-row">
+    <label><input type="radio" name="mode" value="append" checked> Append to existing spreadsheet (de-duplicate)</label>
+    <label><input type="radio" name="mode" value="fresh"> Start fresh (overwrite)</label>
+  </div>
+
+  <div class="actions">
+    <button id="processBtn" disabled>Process Files</button>
+    <button id="downloadBtn">Download Spreadsheet</button>
+  </div>
+
+  <div id="status" class="status"></div>
+  <div id="results" class="results"></div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
