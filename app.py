@@ -7,11 +7,12 @@ from flask import Flask, jsonify, request, send_file
 
 load_dotenv()
 
+from extraction.naming import make_unique_names
 from extraction.pipeline import process_files
-from spreadsheet import load_master, merge_records, write_xlsx
+from spreadsheet import write_xlsx
 
 BASE_DIR = Path(__file__).parent
-MASTER_PATH = BASE_DIR / "master.xlsx"
+OUTPUT_DIR = BASE_DIR / "output"
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xls", ".csv", ".eml", ".html", ".htm"}
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
@@ -22,56 +23,65 @@ def index():
     return app.send_static_file("index.html")
 
 
-@app.route("/api/status")
-def status():
-    return jsonify({"master_exists": MASTER_PATH.exists()})
-
-
 @app.route("/api/process", methods=["POST"])
 def process():
     files = request.files.getlist("files")
-    mode = request.form.get("mode", "append")  # "append" or "fresh"
-
     if not files:
         return jsonify({"error": "No files uploaded"}), 400
 
     tmpdir = Path(tempfile.mkdtemp(prefix="office-avail-"))
     try:
         saved_paths = []
-        skipped = []
+        results = []
         for f in files:
             ext = Path(f.filename).suffix.lower()
             if ext not in ALLOWED_EXTENSIONS:
-                skipped.append({"filename": f.filename, "status": "error", "method": None, "record_count": 0, "error": f"Unsupported file type '{ext}'"})
+                results.append(
+                    {"filename": f.filename, "status": "error", "method": None, "record_count": 0, "error": f"Unsupported file type '{ext}'"}
+                )
                 continue
             dest = tmpdir / f.filename
             f.save(dest)
             saved_paths.append(dest)
 
-        all_records, file_results = process_files(saved_paths)
-        file_results = skipped + file_results
+        results = process_files(saved_paths) + results
 
-        existing = [] if mode == "fresh" else load_master(MASTER_PATH)
-        merged = merge_records(existing, all_records)
-        write_xlsx(MASTER_PATH, merged)
+        # Each processing run's outputs are independent — clear anything
+        # left over from a previous run so download links always match
+        # what's shown in the current results.
+        if OUTPUT_DIR.exists():
+            shutil.rmtree(OUTPUT_DIR)
+        OUTPUT_DIR.mkdir(parents=True)
 
-        return jsonify(
+        ok_results = [r for r in results if r["status"] == "ok"]
+        unique_names = make_unique_names([(r["provider_name"], r["date"]) for r in ok_results])
+        for r, name in zip(ok_results, unique_names):
+            r["output_file"] = f"{name}.xlsx"
+            write_xlsx(OUTPUT_DIR / r["output_file"], r["records"], sheet_title=name)
+
+        response_files = [
             {
-                "files": file_results,
-                "new_records": len(all_records),
-                "total_records": len(merged),
-                "mode": mode,
+                "filename": r["filename"],
+                "status": r["status"],
+                "method": r["method"],
+                "record_count": r["record_count"],
+                "error": r["error"],
+                "output_file": r.get("output_file"),
             }
-        )
+            for r in results
+        ]
+        return jsonify({"files": response_files})
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-@app.route("/api/download")
-def download():
-    if not MASTER_PATH.exists():
-        return jsonify({"error": "No master spreadsheet yet — process some files first"}), 404
-    return send_file(MASTER_PATH, as_attachment=True, download_name="master.xlsx")
+@app.route("/api/download/<path:filename>")
+def download(filename):
+    safe_name = Path(filename).name  # strip any path components
+    file_path = (OUTPUT_DIR / safe_name).resolve()
+    if OUTPUT_DIR.resolve() not in file_path.parents or not file_path.exists():
+        return jsonify({"error": "File not found"}), 404
+    return send_file(file_path, as_attachment=True, download_name=safe_name)
 
 
 if __name__ == "__main__":

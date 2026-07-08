@@ -1,11 +1,11 @@
-"""Load, de-duplicate/append, and write the consolidated master spreadsheet."""
+"""Writes a single source's extracted records to a formatted .xlsx."""
 from pathlib import Path
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from extraction.schema import COLUMNS, dedup_key, normalize_record
+from extraction.schema import COLUMNS
 
 HEADER_FILL = PatternFill(start_color="FF1F2937", end_color="FF1F2937", fill_type="solid")
 HEADER_FONT = Font(bold=True, color="FFFFFFFF")
@@ -14,45 +14,10 @@ NUMBER_COLS = {"Size (sq ft)", "Desks (max)"}
 LINK_COLS = {"Link to Brochure", "Floor Plan", "High Res Images"}
 
 
-def load_master(path):
-    """Returns a list of record dicts from an existing master spreadsheet,
-    or [] if the file doesn't exist yet."""
-    path = Path(path)
-    if not path.exists():
-        return []
-    wb = load_workbook(path, data_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return []
-    header = [str(c) if c is not None else "" for c in rows[0]]
-    records = []
-    for row in rows[1:]:
-        if not any(c not in (None, "") for c in row):
-            continue
-        record = {col: row[i] if i < len(row) else "" for i, col in enumerate(header)}
-        records.append(normalize_record(record))
-    return records
-
-
-def merge_records(existing, new_records):
-    """Upserts new_records into existing by dedup_key — a re-uploaded
-    building/floor overwrites the old row (availability data is assumed to
-    be current-state, not historical), everything else is appended."""
-    by_key = {dedup_key(r): r for r in existing}
-    order = [dedup_key(r) for r in existing]
-    for r in new_records:
-        k = dedup_key(r)
-        if k not in by_key:
-            order.append(k)
-        by_key[k] = r
-    return [by_key[k] for k in order]
-
-
-def write_xlsx(path, records):
+def write_xlsx(path, records, sheet_title="Listings"):
     wb = Workbook()
     ws = wb.active
-    ws.title = "Master"
+    ws.title = sheet_title[:31] or "Listings"  # Excel sheet name length limit
 
     ws.append(COLUMNS)
     for cell in ws[1]:

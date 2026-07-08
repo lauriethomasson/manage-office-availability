@@ -189,6 +189,7 @@ def _read_eml(path):
 
     result["subject"] = msg.get("Subject", "")
     result["sender"] = msg.get("From", "")
+    result["date"] = msg.get("Date", "")
     if not result["text"].strip():
         raise ValueError("EML body is empty after parsing")
     return result

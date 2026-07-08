@@ -22,6 +22,9 @@ class LLMExtractionError(Exception):
 
 
 def extract_with_llm(text, source_hint=""):
+    """Returns (records, source_name). source_name is the LLM's best guess at
+    the sender/broker/company this document is from (used to name the output
+    spreadsheet), or "" if it couldn't confidently tell."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise LLMExtractionError(
@@ -55,10 +58,10 @@ def extract_with_llm(text, source_hint=""):
         raise LLMExtractionError(f"Gemini API call failed: {e}")
 
     raw = response.text or ""
-    records = _parse_and_validate(raw)
+    records, source_name = _parse_and_validate(raw)
     if not records:
         raise LLMExtractionError("LLM returned no usable records for this file")
-    return records
+    return records, source_name
 
 
 def _build_prompt(text, source_hint):
@@ -66,9 +69,14 @@ def _build_prompt(text, source_hint):
     return (
         "You extract commercial office-space listings from arbitrary documents "
         "(broker emails, PDFs, spreadsheets) into a fixed JSON schema.\n\n"
-        f"Return ONLY a JSON array (no markdown, no commentary). Each element is one "
-        f"listing (one floor/unit = one element) with exactly these string fields: "
-        f"[{fields}].\n\n"
+        "Return ONLY a JSON object (no markdown, no commentary) shaped like:\n"
+        '{"source_name": "...", "listings": [...]}\n\n'
+        '"source_name" is the sender/broker/company this document is from, if evident '
+        "(e.g. from a letterhead, email signature, or branding) — a short name suitable "
+        'for use as a filename (e.g. "MetSpace", "Acme Realty"). If you cannot confidently '
+        'identify it, use "".\n\n'
+        f'"listings" is a JSON array. Each element is one listing (one floor/unit = one '
+        f"element) with exactly these string fields: [{fields}].\n\n"
         "Rules:\n"
         '- If a field isn\'t present in the source, use "" (empty string) — never omit a field or invent data.\n'
         "- \"Size (sq ft)\", \"Desks (max)\", the two \"Marketing Price...\" fields should be plain numbers "
@@ -77,7 +85,7 @@ def _build_prompt(text, source_hint):
         "read directly from the source — do not calculate the other yourself.\n"
         "- \"Area\" is the neighbourhood/district name if given (e.g. \"Mayfair\", \"Fitzrovia\").\n"
         "- \"Special Features\" can combine any descriptive text that doesn't fit another field.\n"
-        "- If the document has no office-listing data at all, return an empty JSON array: [].\n\n"
+        '- If the document has no office-listing data at all, return {"source_name": "", "listings": []}.\n\n'
         f"Source file hint: {source_hint or 'unknown'}\n\n"
         "Document text:\n"
         "-----\n"
@@ -93,11 +101,18 @@ def _parse_and_validate(raw):
     except json.JSONDecodeError as e:
         raise LLMExtractionError(f"LLM response was not valid JSON: {e}")
 
-    if not isinstance(data, list):
-        raise LLMExtractionError("LLM response was valid JSON but not a list of records")
+    if not isinstance(data, dict) or "listings" not in data:
+        raise LLMExtractionError('LLM response was valid JSON but not shaped like {"source_name", "listings"}')
+
+    listings = data.get("listings")
+    if not isinstance(listings, list):
+        raise LLMExtractionError("LLM response's \"listings\" field was not a list")
+
+    source_name = data.get("source_name")
+    source_name = source_name.strip() if isinstance(source_name, str) else ""
 
     records = []
-    for item in data:
+    for item in listings:
         if not isinstance(item, dict):
             continue
         record = {}
@@ -105,4 +120,4 @@ def _parse_and_validate(raw):
             v = item.get(field, "")
             record[field] = "" if v is None else str(v)
         records.append(record)
-    return records
+    return records, source_name

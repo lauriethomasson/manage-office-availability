@@ -80,12 +80,3 @@ def _to_number(v):
             return float(s)
         except ValueError:
             return ""
-
-
-def dedup_key(record):
-    """Composite key used to de-duplicate/upsert on append: a listing is
-    the same physical space if Building + Floor/Unit match, regardless of
-    which source it came from or when it was uploaded."""
-    building = str(record.get("Building", "")).strip().lower()
-    floor = str(record.get("Floor/Unit", "")).strip().lower()
-    return f"{building}|{floor}"

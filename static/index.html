@@ -8,7 +8,7 @@
 <body>
 <div class="wrap">
   <h1>Office Availability Consolidator</h1>
-  <p class="sub">Drop broker files below to extract listings into one master spreadsheet.</p>
+  <p class="sub">Drop broker files below — each one is extracted into its own spreadsheet, named after its source.</p>
 
   <div id="dropzone" class="dropzone">
     <p>Drag &amp; drop files here, or click to browse</p>
@@ -19,14 +19,8 @@
 
   <ul id="fileList" class="file-list"></ul>
 
-  <div class="mode-row">
-    <label><input type="radio" name="mode" value="append" checked> Append to existing spreadsheet (de-duplicate)</label>
-    <label><input type="radio" name="mode" value="fresh"> Start fresh (overwrite)</label>
-  </div>
-
   <div class="actions">
     <button id="processBtn" disabled>Process Files</button>
-    <button id="downloadBtn">Download Spreadsheet</button>
   </div>
 
   <div id="status" class="status"></div>

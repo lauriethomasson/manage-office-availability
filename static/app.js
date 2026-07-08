@@ -2,7 +2,6 @@ const dropzone = document.getElementById("dropzone");
 const fileInput = document.getElementById("fileInput");
 const fileListEl = document.getElementById("fileList");
 const processBtn = document.getElementById("processBtn");
-const downloadBtn = document.getElementById("downloadBtn");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
 
@@ -57,11 +56,9 @@ function renderFileList() {
 
 processBtn.addEventListener("click", async () => {
   if (!selectedFiles.length) return;
-  const mode = document.querySelector('input[name="mode"]:checked').value;
 
   const formData = new FormData();
   selectedFiles.forEach((f) => formData.append("files", f));
-  formData.append("mode", mode);
 
   processBtn.disabled = true;
   statusEl.textContent = `Processing ${selectedFiles.length} file(s)…`;
@@ -86,14 +83,15 @@ processBtn.addEventListener("click", async () => {
 });
 
 function renderResults(data) {
+  const okCount = data.files.filter((f) => f.status === "ok").length;
   const summary = document.createElement("div");
   summary.className = "summary-line";
-  summary.textContent = `Extracted ${data.new_records} new record(s). Master spreadsheet now has ${data.total_records} record(s) total (mode: ${data.mode}).`;
+  summary.textContent = `Generated ${okCount} spreadsheet(s) from ${data.files.length} file(s).`;
   resultsEl.appendChild(summary);
 
   const table = document.createElement("table");
   table.innerHTML = `
-    <thead><tr><th>File</th><th>Status</th><th>Method</th><th>Records</th><th>Notes</th></tr></thead>
+    <thead><tr><th>File</th><th>Status</th><th>Method</th><th>Records</th><th>Output</th><th>Notes</th></tr></thead>
     <tbody></tbody>`;
   const tbody = table.querySelector("tbody");
 
@@ -105,11 +103,15 @@ function renderResults(data) {
         ? `Rule (${f.method.slice(5)})`
         : "LLM fallback"
       : "—";
+    const outputCell = f.output_file
+      ? `<a class="download-link" href="/api/download/${encodeURIComponent(f.output_file)}">${escapeHtml(f.output_file)}</a>`
+      : "—";
     tr.innerHTML = `
       <td>${escapeHtml(f.filename)}</td>
       <td><span class="badge ${badgeClass}">${f.status}</span></td>
       <td class="method">${methodLabel}</td>
       <td>${f.record_count}</td>
+      <td>${outputCell}</td>
       <td class="error-text">${f.error ? escapeHtml(f.error) : ""}</td>`;
     tbody.appendChild(tr);
   });
@@ -122,7 +124,3 @@ function escapeHtml(s) {
   div.textContent = s;
   return div.innerHTML;
 }
-
-downloadBtn.addEventListener("click", () => {
-  window.location.href = "/api/download";
-});

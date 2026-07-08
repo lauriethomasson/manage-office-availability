@@ -1,10 +1,12 @@
 # Office Availability Consolidator
 
-A local tool for consolidating office-space listings from broker emails,
-PDFs, spreadsheets, and Word docs into one clean master spreadsheet.
+A local tool for extracting office-space listings from broker emails,
+PDFs, spreadsheets, and Word docs — one clean, formatted `.xlsx` per
+source file.
 
-Drag files onto the page, click **Process Files**, and download a
-formatted `.xlsx` with everything merged and de-duplicated.
+Drag files onto the page, click **Process Files**, and download each
+generated spreadsheet, named after the source it came from (e.g.
+`MetSpace.xlsx`, `Knotel.xlsx`).
 
 ## Setup
 
@@ -37,27 +39,37 @@ Then open **http://127.0.0.1:5000** in your browser.
    resemble the target schema). This is fast and free.
 3. **LLM fallback** — if nothing recognizes the file, its raw text is sent
    to Gemini, which is asked to return structured JSON matching the target
-   schema. The response is validated before anything is written to the
-   spreadsheet; a malformed or empty response is reported as a per-file
-   error, not a crash.
-4. **Merge** — new records are upserted into the existing `master.xlsx` (if
-   one exists in this folder) by a `Building + Floor/Unit` key, so
-   re-uploading an updated availability list overwrites the old row instead
-   of duplicating it. Choose "Start fresh" in the UI to overwrite the whole
-   sheet instead.
+   schema, plus its best guess at the sender/broker name. The response is
+   validated before anything is written to a spreadsheet; a malformed or
+   empty response is reported as a per-file error, not a crash.
+4. **One spreadsheet per file** — each source file gets its own `.xlsx`,
+   named after the identified provider:
+   - Knotel/MetSpace/GPE emails → `Knotel.xlsx`, `MetSpace.xlsx`, `GPE.xlsx`
+   - Anything else → the LLM's identified sender name if it's confident,
+     otherwise a cleaned-up version of the original filename (e.g.
+     `Kitt's Availability (External)....pdf` → `Kitts.xlsx`)
+   - If two files in the same batch resolve to the same name (e.g. two
+     MetSpace emails from different weeks), the second one gets a
+     distinguishing suffix — the email's date if available (`MetSpace
+     (2026-06-30).xlsx`), otherwise a counter (`MetSpace (2).xlsx`).
+
+   Each processing run's outputs are independent — there's no persistent
+   master file merging data across runs. Re-processing a batch overwrites
+   the previous batch's generated spreadsheets.
 
 The results summary after processing shows, per file: how many records were
-extracted, which method was used (rule-based vs LLM), and a clear error
-message for anything that failed — so you can tell at a glance when a new
-source needs a proper parser added to `extraction/rules/`.
+extracted, which method was used (rule-based vs LLM), a download link for
+its generated spreadsheet, and a clear error message for anything that
+failed — so you can tell at a glance when a new source needs a proper
+parser added to `extraction/rules/`.
 
 ## Target schema
 
-The master spreadsheet's columns were derived from the example output
-(`Kitt's Availability... .pdf`) — see `extraction/schema.py`. The two
-"Contact" columns are a naming assumption (the source PDF had a single
-merged header, "Please reach out to the team assigned to this space", over
-two name columns with no sub-header text of their own).
+Each spreadsheet's columns were derived from the example output (`Kitt's
+Availability... .pdf`) — see `extraction/schema.py`. The two "Contact"
+columns are a naming assumption (the source PDF had a single merged
+header, "Please reach out to the team assigned to this space", over two
+name columns with no sub-header text of their own).
 
 ## Adding a new source
 
@@ -65,7 +77,9 @@ If a new sender's emails consistently fail to a rule and always land on
 the LLM fallback, it's worth adding a dedicated parser: drop a new module
 in `extraction/rules/` following the pattern in `knotel.py`/`metspace.py`/
 `gpe.py` (a `detect(content)` and `parse(content)` function), then register
-it in `extraction/rules/__init__.py`.
+it in `extraction/rules/__init__.py`. Doing so also means its output
+spreadsheet gets a proper provider-name (e.g. `Foo.xlsx`) instead of
+falling back to a filename guess.
 
 ## Tests
 
@@ -81,5 +95,5 @@ that nothing has silently broken.
 
 - Runs entirely on localhost. The only outbound network call is to the
   Gemini API, and only for files that need the LLM fallback.
-- `master.xlsx` and `.env` are gitignored — they're local, working-copy
-  data/secrets, not something to version.
+- Generated spreadsheets live in `output/`, which — like `.env` — is
+  gitignored: it's local, working-copy data, not something to version.
