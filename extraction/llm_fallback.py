@@ -9,7 +9,11 @@ import re
 
 from .schema import LLM_FIELDS
 
-MODEL = "gemini-3.5-flash"
+# gemini-3.5-flash's free tier is capped at just 20 requests/day (Google's
+# newest flash-tier model). gemini-3.1-flash-lite is explicitly positioned
+# for high-volume, cost-sensitive traffic and gets a much more generous
+# free-tier daily quota, while still supporting JSON mode and thinking_config.
+MODEL = "gemini-3.1-flash-lite"
 MAX_TEXT_CHARS = 15000  # keep prompts bounded; most sources are far shorter
 
 
