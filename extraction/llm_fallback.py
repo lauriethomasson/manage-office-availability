@@ -14,7 +14,11 @@ from .schema import LLM_FIELDS
 # for high-volume, cost-sensitive traffic and gets a much more generous
 # free-tier daily quota, while still supporting JSON mode and thinking_config.
 MODEL = "gemini-3.1-flash-lite"
-MAX_TEXT_CHARS = 15000  # keep prompts bounded; most sources are far shorter
+MAX_TEXT_CHARS = 40000  # keep prompts bounded; most sources are far shorter,
+# but a multi-page brochure with 40+ listings can get close to this.
+MAX_OUTPUT_TOKENS = 24000  # a 17-field JSON schema repeated per listing adds
+# up fast — a ~40-listing document needs well over the old 4000-token budget.
+# The model's ceiling is 65536; this leaves comfortable headroom for larger ones.
 
 
 class LLMExtractionError(Exception):
@@ -47,7 +51,7 @@ def extract_with_llm(text, source_hint=""):
             model=MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
-                max_output_tokens=4000,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
                 response_mime_type="application/json",
                 # Keep the token budget for the actual JSON response, not
                 # hidden reasoning — max_output_tokens caps both combined.
