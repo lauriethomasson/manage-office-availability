@@ -27,7 +27,10 @@ one of the known rule-based parsers. Get a key from
 python app.py
 ```
 
-Then open **http://127.0.0.1:5000** in your browser.
+Then open **http://127.0.0.1:5000** in your browser — local dev runs
+"open" (no access token needed) unless you've set `ACCESS_TOKEN` in your
+`.env`, in which case the app lives at `http://127.0.0.1:5000/<token>`
+instead (see [Deployment](#deployment-render) for why).
 
 ## How it works
 
@@ -94,9 +97,100 @@ Runs the three example broker emails and the example PDF through the
 rule-based parsers and checks the record counts — a quick regression check
 that nothing has silently broken.
 
+## Deployment (Render)
+
+The app can also run as a small hosted service for a handful of known
+people, instead of only on localhost. It's set up for
+[Render](https://render.com)'s free tier — a good fit here because it
+deploys straight from a GitHub repo with no Docker/config authoring
+required, environment variables are first-class (no secrets in the repo),
+and it doesn't restrict outbound network calls (some free hosts do, which
+would silently break the Gemini API fallback).
+
+### Deploy steps
+
+1. Push this repo to GitHub if it isn't already.
+2. Create a free account at [render.com](https://render.com) (GitHub
+   login is easiest).
+3. **New → Web Service**, connect your GitHub account, and select this
+   repo. Render will detect `render.yaml` automatically; if it doesn't,
+   set these manually:
+   - **Environment**: Python
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `gunicorn app:app --bind 0.0.0.0:$PORT`
+   - **Plan**: Free
+4. Under **Environment**, add two environment variables:
+   - `GEMINI_API_KEY` — your key from
+     [Google AI Studio](https://aistudio.google.com/apikey)
+   - `ACCESS_TOKEN` — a long random string (see below); generate one with:
+     ```
+     python -c "import secrets; print(secrets.token_urlsafe(16))"
+     ```
+5. Click **Create Web Service**. The first build takes a few minutes;
+   Render gives you a URL like `https://office-availability-consolidator.onrender.com`.
+
+### The access token
+
+`ACCESS_TOKEN` gates the app behind an unguessable URL: the real page
+lives at `https://<your-app>.onrender.com/<ACCESS_TOKEN>`, not at the
+root. The root path and any wrong/missing token both return a plain 404,
+so there's nothing to distinguish "wrong guess" from "page doesn't
+exist." The API endpoints (`/api/process`, `/api/download/...`) require
+the same token too (sent automatically by the page's own JS), so knowing
+those paths without the token doesn't help.
+
+**What this protects against:** casual discovery — search engine
+crawling, opportunistic URL scanning, someone finding the Render app
+name and guessing at paths.
+
+**What this does NOT protect against:** anyone who already has the full
+URL can use the app fully, indistinguishable from an authorized user —
+there's no per-person login, so you can't tell people apart or revoke
+just one person's access without rotating the token for everyone. The
+token also isn't encrypted-at-rest anywhere special — it's a shared
+secret, similar in spirit to an unlisted Google Doc link. If it leaks
+(e.g. forwarded somewhere public), rotate it: change `ACCESS_TOKEN` in
+Render's dashboard and share the new URL — no code change or redeploy
+needed for the value itself, though Render does restart the service to
+pick up the new env var.
+
+If you outgrow this later, the natural upgrade is Flask-Login or
+HTTP Basic Auth with per-person credentials, or Render's own paid
+"Preview/Access Control" features.
+
+### Multi-user behavior
+
+Each **Process Files** click gets its own isolated batch folder
+(`output/<random-batch-id>/`) and its own download links — two people
+using the app at the same time (or one person running two batches back
+to back) never overwrite each other's generated spreadsheets. Batch
+folders older than an hour are cleaned up automatically on the next
+request; Render's disk is also ephemeral and resets on every deploy/restart
+regardless, so nothing here is meant to persist long-term.
+
+### Free tier limits & costs
+
+- **Spins down after 15 minutes of inactivity.** The next request after
+  that wakes it back up, which takes roughly 30–60 seconds (the request
+  will just hang/load slowly during that time — no action needed, it
+  resolves itself). Fine for occasional use by a small group; annoying if
+  someone's waiting on a fast response for a demo.
+- **750 free instance-hours/month** across all your free services —
+  effectively unlimited for a low-traffic internal tool used by a few
+  people, since a spun-down service doesn't consume hours.
+- **No persistent disk on the free tier** — not an issue here, since
+  nothing needs to survive a restart (see above).
+- **Outbound bandwidth and build minutes** are generously capped on the
+  free tier; a handful of users uploading office-listing documents won't
+  come close.
+- **When to upgrade**: if the 30–60s wake-up delay becomes annoying (a
+  paid instance stays running), or if you need more than 750 hours/month
+  across free services (unlikely for this use case). Render's cheapest
+  paid tier is a few dollars/month.
+
 ## Notes
 
-- Runs entirely on localhost. The only outbound network call is to the
-  Gemini API, and only for files that need the LLM fallback.
+- The only outbound network call is to the Gemini API, and only for
+  files that need the LLM fallback.
 - Generated spreadsheets live in `output/`, which — like `.env` — is
   gitignored: it's local, working-copy data, not something to version.

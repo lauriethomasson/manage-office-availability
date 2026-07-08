@@ -65,7 +65,11 @@ processBtn.addEventListener("click", async () => {
   resultsEl.innerHTML = "";
 
   try {
-    const res = await fetch("/api/process", { method: "POST", body: formData });
+    const res = await fetch("/api/process", {
+      method: "POST",
+      body: formData,
+      headers: { "X-Access-Token": window.ACCESS_TOKEN || "" },
+    });
     const data = await res.json();
     if (!res.ok) {
       statusEl.textContent = `Error: ${data.error || "processing failed"}`;
@@ -103,8 +107,11 @@ function renderResults(data) {
         ? `Rule (${f.method.slice(5)})`
         : "LLM fallback"
       : "—";
+    const downloadUrl =
+      `/api/download/${encodeURIComponent(data.batch_id)}/${encodeURIComponent(f.output_file)}` +
+      `?token=${encodeURIComponent(window.ACCESS_TOKEN || "")}`;
     const outputCell = f.output_file
-      ? `<a class="download-link" href="/api/download/${encodeURIComponent(f.output_file)}">${escapeHtml(f.output_file)}</a>`
+      ? `<a class="download-link" href="${downloadUrl}">${escapeHtml(f.output_file)}</a>`
       : "—";
     tr.innerHTML = `
       <td>${escapeHtml(f.filename)}</td>
