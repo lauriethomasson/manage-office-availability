@@ -24,8 +24,7 @@ def detect(content):
 
 def parse(content):
     lines = [l.strip() for l in content["text"].split("\n") if l.strip()]
-    sender_name = _sender_name(content.get("sender", ""))
-    contact2 = _second_contact(lines, sender_name)
+    contact = _contact_block(lines)
 
     records = []
     buffer = []
@@ -84,8 +83,7 @@ def parse(content):
                     "Desks (max)": _max_desks(desks_desc),
                     "Marketing Price (Based on Min Term) PCM": price_val.replace("£", "").replace(",", ""),
                     "Special Features": desks_desc,
-                    "Contact 1": sender_name,
-                    "Contact 2": contact2,
+                    "Contact 1": contact,
                 }
             )
             i += 4  # consumed Sqft, Desks, Price, and Av lines
@@ -106,18 +104,28 @@ def _max_desks(desc):
     return m2.group() if m2 else ""
 
 
-def _sender_name(sender_header):
-    m = re.match(r"^\s*([^<]+?)\s*<", sender_header or "")
-    return m.group(1).strip() if m else (sender_header or "").strip()
+NAME_RE = re.compile(r"^[A-Z][a-zA-Z'.-]+(?: [A-Z][a-zA-Z'.-]+)+$")
 
 
-def _second_contact(lines, exclude_name):
+def _contact_block(lines):
+    """MetSpace emails end with a fixed, company-wide contact list — not
+    per-listing info — shaped as repeating groups of
+    Name / Title / Phone / Email / Website. Job titles can themselves look
+    name-shaped (e.g. "Sales Manager" is two capitalized words), so rather
+    than pattern-matching every line for "looks like a name", anchor on the
+    one line in each group that's unambiguous — the website — and take the
+    name as whatever sits exactly 4 lines before it."""
     try:
         idx = lines.index("Contact")
     except ValueError:
         return ""
-    name_re = re.compile(r"^[A-Z][a-zA-Z'.-]+(?: [A-Z][a-zA-Z'.-]+)+$")
-    for l in lines[idx + 1 : idx + 20]:
-        if name_re.match(l) and l != exclude_name and "@" not in l:
-            return l
-    return ""
+    end = next((i for i in range(idx + 1, len(lines)) if lines[i].lower().startswith("copyright")), len(lines))
+    block = lines[idx + 1 : end]
+
+    names = []
+    for i, line in enumerate(block):
+        if line.lower().startswith("www.") and i >= 4:
+            candidate = block[i - 4]
+            if NAME_RE.match(candidate) and candidate not in names:
+                names.append(candidate)
+    return ", ".join(names)
