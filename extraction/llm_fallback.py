@@ -38,7 +38,7 @@ def extract_with_llm(text, source_hint=""):
 
     try:
         from google import genai
-        from google.genai import types
+        from google.genai import errors, types
     except ImportError:
         raise LLMExtractionError("The 'google-genai' package is not installed — run: pip install -r requirements.txt")
 
@@ -46,7 +46,14 @@ def extract_with_llm(text, source_hint=""):
     prompt = _build_prompt(truncated, source_hint)
 
     try:
-        client = genai.Client(api_key=api_key)
+        # vertexai=False pins the client to the Gemini Developer API backend
+        # explicitly. Without it, an ambient environment variable the SDK
+        # checks implicitly (GOOGLE_GENAI_USE_VERTEXAI) can silently reroute
+        # it to the Vertex AI backend instead, which authenticates via
+        # OAuth2/Application Default Credentials rather than an API key —
+        # producing a 401 ACCESS_TOKEN_TYPE_UNSUPPORTED error that has
+        # nothing to do with whether GEMINI_API_KEY itself is valid.
+        client = genai.Client(api_key=api_key, vertexai=False)
         response = client.models.generate_content(
             model=MODEL,
             contents=prompt,
@@ -58,6 +65,15 @@ def extract_with_llm(text, source_hint=""):
                 thinking_config=types.ThinkingConfig(thinking_level="low"),
             ),
         )
+    except errors.APIError as e:
+        if getattr(e, "code", None) in (401, 403):
+            raise LLMExtractionError(
+                f"Gemini API rejected the API key ({e.code} — {getattr(e, 'message', e)}). "
+                "GEMINI_API_KEY is set but its value isn't a valid, active key — check it's "
+                "copied from https://aistudio.google.com/apikey with no surrounding quotes or "
+                "whitespace, and that it hasn't been revoked."
+            )
+        raise LLMExtractionError(f"Gemini API call failed: {e}")
     except Exception as e:
         raise LLMExtractionError(f"Gemini API call failed: {e}")
 
