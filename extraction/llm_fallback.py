@@ -1,5 +1,5 @@
 """LLM-based extraction fallback, used when no rule-based parser recognizes
-a file's layout. Calls the Anthropic API with the raw extracted text and
+a file's layout. Calls the Gemini API with the raw extracted text and
 asks for JSON matching the target schema; validates the response before it
 ever reaches the spreadsheet.
 """
@@ -9,7 +9,7 @@ import re
 
 from .schema import LLM_FIELDS
 
-MODEL = "claude-sonnet-4-5"
+MODEL = "gemini-3.5-flash"
 MAX_TEXT_CHARS = 15000  # keep prompts bounded; most sources are far shorter
 
 
@@ -18,32 +18,39 @@ class LLMExtractionError(Exception):
 
 
 def extract_with_llm(text, source_hint=""):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise LLMExtractionError(
-            "No ANTHROPIC_API_KEY set — cannot use the LLM fallback for this file. "
+            "No GEMINI_API_KEY set — cannot use the LLM fallback for this file. "
             "Add it to your .env file (see README)."
         )
 
     try:
-        import anthropic
+        from google import genai
+        from google.genai import types
     except ImportError:
-        raise LLMExtractionError("The 'anthropic' package is not installed — run: pip install -r requirements.txt")
+        raise LLMExtractionError("The 'google-genai' package is not installed — run: pip install -r requirements.txt")
 
     truncated = text[:MAX_TEXT_CHARS]
     prompt = _build_prompt(truncated, source_hint)
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
             model=MODEL,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=4000,
+                response_mime_type="application/json",
+                # Keep the token budget for the actual JSON response, not
+                # hidden reasoning — max_output_tokens caps both combined.
+                thinking_config=types.ThinkingConfig(thinking_level="low"),
+            ),
         )
     except Exception as e:
-        raise LLMExtractionError(f"Anthropic API call failed: {e}")
+        raise LLMExtractionError(f"Gemini API call failed: {e}")
 
-    raw = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
+    raw = response.text or ""
     records = _parse_and_validate(raw)
     if not records:
         raise LLMExtractionError("LLM returned no usable records for this file")

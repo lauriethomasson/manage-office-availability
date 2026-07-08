@@ -12,12 +12,12 @@ formatted `.xlsx` with everything merged and de-duplicated.
 python -m venv venv
 venv\Scripts\activate          # Windows
 pip install -r requirements.txt
-copy .env.example .env         # then edit .env and add your ANTHROPIC_API_KEY
+copy .env.example .env         # then edit .env and add your GEMINI_API_KEY
 ```
 
 The API key is only used as a fallback, when a file's layout doesn't match
-one of the known rule-based parsers. Get a key at
-[console.anthropic.com](https://console.anthropic.com/).
+one of the known rule-based parsers. Get a key from
+[Google AI Studio](https://aistudio.google.com/apikey).
 
 ## Run
 
@@ -36,7 +36,7 @@ Then open **http://127.0.0.1:5000** in your browser.
    generic "grid" parser for any spreadsheet/PDF whose columns already
    resemble the target schema). This is fast and free.
 3. **LLM fallback** — if nothing recognizes the file, its raw text is sent
-   to Claude, which is asked to return structured JSON matching the target
+   to Gemini, which is asked to return structured JSON matching the target
    schema. The response is validated before anything is written to the
    spreadsheet; a malformed or empty response is reported as a per-file
    error, not a crash.
@@ -80,6 +80,6 @@ that nothing has silently broken.
 ## Notes
 
 - Runs entirely on localhost. The only outbound network call is to the
-  Anthropic API, and only for files that need the LLM fallback.
+  Gemini API, and only for files that need the LLM fallback.
 - `master.xlsx` and `.env` are gitignored — they're local, working-copy
   data/secrets, not something to version.
