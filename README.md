@@ -66,16 +66,29 @@ its generated spreadsheet, and a clear error message for anything that
 failed — so you can tell at a glance when a new source needs a proper
 parser added to `extraction/rules/`.
 
-5. **Link to Brochure** — a copy of the original uploaded file is saved
-   alongside its generated spreadsheet (as-is; an `.eml` stays a raw
-   `.eml`, no conversion), and every extracted row's `Link to Brochure`
-   column is set to an absolute URL back to it (`app.py`,
-   `_download_url`). All rows from the same source file share the exact
-   same URL, since it identifies the source document, not a listing.
-   The link carries the access token as a query param (`?token=...`)
-   rather than relying on the page's own JS header, since clicking a
-   hyperlink in Excel opens a plain browser navigation with no custom
-   headers.
+5. **Link to Brochure** — every extracted row's `Link to Brochure` column
+   is set to an absolute URL (`app.py`, `_download_url`) back to a
+   brochure artifact saved alongside the generated spreadsheet. All rows
+   from the same source file share the exact same URL, since it
+   identifies the source document, not a listing. The link carries the
+   access token as a query param (`?token=...`) rather than relying on
+   the page's own JS header, since clicking a hyperlink in Excel opens a
+   plain browser navigation with no custom headers.
+
+   Opens directly in-browser rather than downloading, for PDF and
+   `.eml` sources:
+   - A PDF source is used as-is, served with `Content-Disposition: inline`
+     — the browser's own PDF viewer renders it.
+   - An `.eml` with an HTML body links to that HTML directly (the email's
+     own HTML MIME part, already parsed by `file_readers.py`, unmodified
+     — not a re-rendered conversion), served as `text/html` + `inline`.
+     Opens like the original email, images included, since the markup
+     already points at the sender's hosted image URLs. A plain-text-only
+     `.eml` (no HTML part) falls back to linking the raw `.eml` as a
+     normal attachment download.
+   - `.docx`/`.xlsx`/`.xls`/`.csv` have no reliable native in-browser
+     renderer, so they're left as normal attachment downloads of the
+     original file.
 
    `/api/download` always tries local disk first (fast path — the batch
    that just ran). If the local copy is gone — Render's free-tier disk is
