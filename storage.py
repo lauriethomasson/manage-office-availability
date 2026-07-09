@@ -35,6 +35,7 @@ def _get_client():
     if _client is not None:
         return _client
     import boto3
+    from botocore.config import Config
 
     _client = boto3.client(
         "s3",
@@ -42,6 +43,16 @@ def _get_client():
         aws_access_key_id=_ACCESS_KEY,
         aws_secret_access_key=_SECRET_KEY,
         region_name=_REGION,
+        # Recent botocore versions (~1.36+) default to attaching
+        # x-amz-checksum-* headers to S3 requests. AWS S3 and Cloudflare
+        # R2 handle that fine, but Backblaze B2's S3-compatible API
+        # doesn't support it and rejects/mishandles those requests —
+        # "when_required" only sends/expects checksums where the S3 API
+        # itself mandates them, which every one of these providers supports.
+        config=Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
     )
     return _client
 
