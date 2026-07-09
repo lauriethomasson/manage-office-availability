@@ -23,6 +23,10 @@ KEYWORDS = {
     "Broker Fee": [["broker", "fee"]],
     "Floor Plan": [["floor", "plan"]],
     "High Res Images": [["high", "res"], ["images"]],
+    # Not a spreadsheet column itself — schema.normalize_record reads this
+    # off the raw record to set "For Sale" when a source lists a genuine
+    # per-listing sale price, rather than hardcoding it.
+    "Sale Price": [["sale", "price"]],
 }
 MIN_MATCHES = 4
 

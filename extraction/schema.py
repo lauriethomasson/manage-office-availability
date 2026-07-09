@@ -96,11 +96,26 @@ def normalize_record(record):
     out["Property Postcode"] = extract_postcode(out["Building"])
     out["Lat"] = ""
     out["Lng"] = ""
-    # All current sources are lettings, not sales.
-    out["For Sale"] = "No"
+    # "Sale Price" isn't a spreadsheet column — it's a raw per-listing
+    # signal some sources provide (e.g. BC lists a separate Sale Price
+    # alongside its rental price for a handful of listings) that a rule
+    # parser (extraction/rules/grid.py) or the LLM fallback may set on the
+    # raw record. For Sale reflects whether that signal is a genuine value,
+    # not "N/A"/blank — "No" whenever a source has no such signal at all,
+    # which is every current source except a few BC listings.
+    out["For Sale"] = "Yes" if _has_real_value(record.get("Sale Price")) else "No"
     out["To Let"] = "Yes"
 
     return out
+
+
+_NO_VALUE_TOKENS = {"", "n/a", "na", "-", "none", "tbc", "0"}
+
+
+def _has_real_value(v):
+    if v is None:
+        return False
+    return str(v).strip().lower() not in _NO_VALUE_TOKENS
 
 
 def _to_number(v):

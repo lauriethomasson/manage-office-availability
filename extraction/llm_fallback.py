@@ -9,6 +9,14 @@ import re
 
 from .schema import LLM_FIELDS
 
+# Beyond the visible spreadsheet columns in LLM_FIELDS, also ask for a raw
+# sale-price signal — some sources (e.g. BC) list a genuine per-listing
+# sale price alongside their rental price; schema.normalize_record uses
+# this to set "For Sale" instead of hardcoding it. Not a spreadsheet
+# column itself, so it's kept separate from LLM_FIELDS/schema.COLUMNS.
+EXTRA_FIELDS = ["Sale Price"]
+ALL_FIELDS = LLM_FIELDS + EXTRA_FIELDS
+
 # gemini-3.5-flash's free tier is capped at just 20 requests/day (Google's
 # newest flash-tier model). gemini-3.1-flash-lite is explicitly positioned
 # for high-volume, cost-sensitive traffic and gets a much more generous
@@ -101,7 +109,7 @@ def extract_with_llm(text, source_hint=""):
 
 
 def _build_prompt(text, source_hint):
-    fields = ", ".join(f'"{f}"' for f in LLM_FIELDS)
+    fields = ", ".join(f'"{f}"' for f in ALL_FIELDS)
     return (
         "You extract commercial office-space listings from arbitrary documents "
         "(broker emails, PDFs, spreadsheets) into a fixed JSON schema.\n\n"
@@ -124,6 +132,10 @@ def _build_prompt(text, source_hint):
         "(e.g. \"Kieran Christie, Sophie Haugh, Nicki Mayle\") — however many are actually given, not "
         "just one or two.\n"
         "- \"Special Features\" can combine any descriptive text that doesn't fit another field.\n"
+        '- "Sale Price" is a distinct per-listing sale price, only if the source explicitly lists one '
+        "separate from its rental price (e.g. a table with both a \"Market Price\" rental column and a "
+        "\"Sale Price\" column) — use \"\" if the source shows no such value, or shows \"N/A\"/\"-\" for "
+        "that listing's sale price specifically. Never infer a sale price from the rental price.\n"
         '- If the document has no office-listing data at all, return {"source_name": "", "listings": []}.\n\n'
         f"Source file hint: {source_hint or 'unknown'}\n\n"
         "Document text:\n"
@@ -155,7 +167,7 @@ def _parse_and_validate(raw):
         if not isinstance(item, dict):
             continue
         record = {}
-        for field in LLM_FIELDS:
+        for field in ALL_FIELDS:
             v = item.get(field, "")
             record[field] = "" if v is None else str(v)
         records.append(record)
