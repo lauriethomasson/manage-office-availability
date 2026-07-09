@@ -59,8 +59,14 @@ def write_xlsx(path, records, sheet_title="Listings"):
             elif col_name in COORDINATE_COLS and isinstance(val, (int, float)) and val != "":
                 cell.number_format = "0.000000"
             elif col_name in LINK_COLS and isinstance(val, str) and val.startswith("http"):
-                cell.hyperlink = val
+                # Show a short "Here" label instead of the raw URL — the
+                # actual link still goes to the real address via
+                # cell.hyperlink, only the displayed text changes.
+                actual_url = val
+                cell.value = "Here"
+                cell.hyperlink = actual_url
                 cell.font = Font(color="FF0563C1", underline="single")
+                val = cell.value
             elif col_name in WRAP_COLS:
                 cell.alignment = WRAP_ALIGNMENT
             max_len = max(max_len, len(str(val)) if val is not None else 0)
