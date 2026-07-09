@@ -66,6 +66,21 @@ its generated spreadsheet, and a clear error message for anything that
 failed — so you can tell at a glance when a new source needs a proper
 parser added to `extraction/rules/`.
 
+5. **Link to Brochure** — a copy of the original uploaded file is saved
+   alongside its generated spreadsheet (as-is; an `.eml` stays a raw
+   `.eml`, no conversion), and every extracted row's `Link to Brochure`
+   column is set to an absolute URL back to it (`app.py`,
+   `_download_url`). All rows from the same source file share the exact
+   same URL, since it identifies the source document, not a listing.
+   The link carries the access token as a query param (`?token=...`)
+   rather than relying on the page's own JS header, since clicking a
+   hyperlink in Excel opens a plain browser navigation with no custom
+   headers. This shares the same lifetime as the generated spreadsheets
+   themselves (see [Multi-user behavior](#multi-user-behavior)) — the
+   link stops working once its batch folder is cleaned up or the
+   instance restarts, so it's for "where did this come from" during/soon
+   after a processing run, not long-term archival.
+
 ## Target schema
 
 Each spreadsheet's columns were derived from the example output (`Kitt's
@@ -82,8 +97,14 @@ compatibility (matching the "Loader" sheet of
 `kato-disposals-loader-example-LATEST VERSION (3).xlsx`): `External Ref`,
 `Assigned Agents`, `Property Address 1`, `Property Postcode`, `Lat`,
 `Lng`, `For Sale`, `To Let`. These are derived, not extracted — see
-`normalize_record` in `extraction/schema.py`:
-- `External Ref` is always blank (assigned on Kato's side).
+`normalize_record` in `extraction/schema.py` and `process_files` in
+`extraction/pipeline.py`:
+- `External Ref` is `<ProviderName>_<YYYY-MM-DD>` — the same value for
+  every row in a spreadsheet, since it identifies the source batch, not
+  an individual listing. The date prefers the source document's own date
+  (an email's `Date` header, then PDF/DOCX metadata) over processing
+  time, falling back to the processing date only when neither is
+  available (`extraction/naming.resolve_source_date`).
 - `Assigned Agents` mirrors `Contacts`.
 - `Property Address 1` mirrors `Building`, and `Property Postcode` is
   parsed out of it with a UK postcode regex (`extraction/address.py`) —

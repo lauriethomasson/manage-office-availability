@@ -5,6 +5,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request, send_file
@@ -73,11 +74,11 @@ def process():
     tmpdir = Path(tempfile.mkdtemp(prefix="office-avail-"))
     try:
         saved_paths = []
-        results = []
+        unsupported_results = []
         for f in files:
             ext = Path(f.filename).suffix.lower()
             if ext not in ALLOWED_EXTENSIONS:
-                results.append(
+                unsupported_results.append(
                     {"filename": f.filename, "status": "error", "method": None, "record_count": 0, "error": f"Unsupported file type '{ext}'"}
                 )
                 continue
@@ -85,7 +86,14 @@ def process():
             f.save(dest)
             saved_paths.append(dest)
 
-        results = process_files(saved_paths) + results
+        processed_results = process_files(saved_paths)
+        # process_files() returns exactly one result per input path, in the
+        # same order — pair each back up with its saved original so the
+        # "ok" ones below can copy it into the persistent batch dir (the
+        # tmpdir it currently lives in is wiped in `finally`, below).
+        for r, path in zip(processed_results, saved_paths):
+            r["_source_path"] = path
+        results = processed_results + unsupported_results
 
         ok_results = [r for r in results if r["status"] == "ok"]
         if ok_results:
@@ -93,6 +101,22 @@ def process():
         unique_names = make_unique_names([(r["provider_name"], r["date"]) for r in ok_results])
         for r, name in zip(ok_results, unique_names):
             r["output_file"] = f"{name}.xlsx"
+
+            # Persist a copy of the original source file alongside the
+            # generated spreadsheet (as-is — an .eml stays a raw .eml, no
+            # conversion), and point every extracted row's "Link to
+            # Brochure" at it so the spreadsheet is traceable back to
+            # where the data came from. Reuses the same collision-free
+            # `name` the spreadsheet got, so it can't collide with another
+            # source file in this batch.
+            source_path = r["_source_path"]
+            source_filename = f"{name}{source_path.suffix.lower()}"
+            shutil.copy2(source_path, batch_dir / source_filename)
+            r["source_file"] = source_filename
+            source_url = _download_url(batch_id, source_filename)
+            for record in r["records"]:
+                record["Link to Brochure"] = source_url
+
             write_xlsx(batch_dir / r["output_file"], r["records"], sheet_title=name)
 
         response_files = [
@@ -103,12 +127,25 @@ def process():
                 "record_count": r["record_count"],
                 "error": r["error"],
                 "output_file": r.get("output_file"),
+                "source_file": r.get("source_file"),
             }
             for r in results
         ]
         return jsonify({"batch_id": batch_id, "files": response_files})
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _download_url(batch_id, filename):
+    """Absolute URL for /api/download/<batch_id>/<filename>, usable outside
+    the app's own JS fetch (e.g. an Excel hyperlink click) — so it carries
+    the access token as a query param, since a browser navigating there
+    directly can't send the X-Access-Token header the page's own JS uses.
+    Uses X-Forwarded-Proto over request.scheme so this comes out as https
+    on Render, which terminates TLS at its edge and forwards plain http."""
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+    token_part = f"?token={quote(ACCESS_TOKEN)}" if ACCESS_TOKEN else ""
+    return f"{scheme}://{request.host}/api/download/{quote(batch_id)}/{quote(filename)}{token_part}"
 
 
 @app.route("/api/download/<batch_id>/<path:filename>")
