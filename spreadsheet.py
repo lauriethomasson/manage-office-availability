@@ -16,13 +16,17 @@ HEADER_FONT = Font(bold=True, color="FFFFFFFF")
 CURRENCY_COLS = {"Marketing Price (Based on Min Term) PCM", "Marketing Price (Based on Min Term) PSF"}
 NUMBER_COLS = {"Size (sq ft)", "Desks (max)"}
 COORDINATE_COLS = {"Lat", "Lng"}
-# Only Link to Brochure gets the clickable-hyperlink treatment — it's a
-# link we generate ourselves to a file we control and persist. Floor Plan
-# and High Res Images hold whatever URL (if any) a source document itself
-# provided, which isn't reliable yet, so for now they're left as plain
-# text rather than clickable links (there is no "Photo Link" column in
-# the current schema — only these two — so nothing to change there).
-LINK_COLS = {"Link to Brochure"}
+# Columns whose value is a URL, shown as a short clickable label instead
+# of the raw link text (e.g. a long UUID-based URL) — same pattern for
+# all three: cell.value becomes the label, cell.hyperlink keeps the real
+# URL. Left blank (not the label) when there's genuinely no URL for that
+# row. There is no "Photo Link" column in the current schema — only
+# these three — so nothing to add there.
+LINK_LABELS = {
+    "Link to Brochure": "Here",
+    "Floor Plan": "Floor Plan",
+    "High Res Images": "High Res Images",
+}
 # Free-text columns that can run long enough to overflow into neighboring
 # cells — wrapped within their own cell instead, with row height grown to fit.
 WRAP_COLS = {"Special Features", "Contacts", "Assigned Agents"}
@@ -74,12 +78,12 @@ def write_xlsx(path, records, sheet_title="Listings"):
                 cell.number_format = "#,##0"
             elif col_name in COORDINATE_COLS and isinstance(val, (int, float)) and val != "":
                 cell.number_format = "0.000000"
-            elif col_name in LINK_COLS and isinstance(val, str) and val.startswith("http"):
-                # Show a short "Here" label instead of the raw URL — the
-                # actual link still goes to the real address via
-                # cell.hyperlink, only the displayed text changes.
+            elif col_name in LINK_LABELS and isinstance(val, str) and val.startswith("http"):
+                # Show a short label instead of the raw URL — the actual
+                # link still goes to the real address via cell.hyperlink,
+                # only the displayed text changes.
                 actual_url = val
-                cell.value = "Here"
+                cell.value = LINK_LABELS[col_name]
                 cell.hyperlink = actual_url
                 cell.font = Font(color="FF0563C1", underline="single")
                 val = cell.value
