@@ -40,6 +40,15 @@ CONTENT_TYPES = {
     ".html": "text/html",
     ".htm": "text/html",
 }
+# Extensions a browser can render natively — served as `inline` so
+# clicking the link opens it directly in the browser's own viewer
+# (e.g. Chrome/Edge's built-in PDF viewer), instead of downloading to disk
+# and handing off to the OS's default app for that extension, which is
+# what let a PDF get opened in Word rather than a PDF viewer. Types with
+# no native browser renderer (.eml, .docx, .xlsx, .xls, .csv) still need
+# `attachment` — there's no in-browser way to view those, they always have
+# to hand off to a desktop app, so at least force a clean, named download.
+INLINE_EXTENSIONS = {".pdf"}
 
 # Set in the hosting platform's environment variables (never committed). If
 # unset, the app runs "open" with no path/token gating — fine for local dev,
@@ -106,7 +115,14 @@ def process():
             f.save(dest)
             saved_paths.append(dest)
 
-        results = process_files(saved_paths) + unsupported_results
+        processed_results = process_files(saved_paths)
+        # process_files() returns exactly one result per input path, in the
+        # same order — pair each back up with its saved original so the
+        # "ok" ones below can copy it into the persistent batch dir (the
+        # tmpdir it currently lives in is wiped in `finally`, below).
+        for r, path in zip(processed_results, saved_paths):
+            r["_source_path"] = path
+        results = processed_results + unsupported_results
 
         ok_results = [r for r in results if r["status"] == "ok"]
         if ok_results:
@@ -115,33 +131,31 @@ def process():
         for r, name in zip(ok_results, unique_names):
             r["output_file"] = f"{name}.xlsx"
 
-            # process_files() already resolved brochure_path to a PDF —
-            # either the original upload as-is (it was already a PDF) or a
-            # freshly rendered snapshot (extraction/pdf_snapshot.py) for
-            # anything else. Either way, Link to Brochure always ends up
-            # pointing at a .pdf here. Reuses the same collision-free
+            # Persist a copy of the original source file alongside the
+            # generated spreadsheet (as-is — an .eml stays a raw .eml, no
+            # conversion), and point every extracted row's "Link to
+            # Brochure" at it so the spreadsheet is traceable back to
+            # where the data came from. Reuses the same collision-free
             # `name` the spreadsheet got, so it can't collide with another
             # source file in this batch.
-            brochure_path = r.get("brochure_path")
-            if brochure_path and Path(brochure_path).exists():
-                brochure_filename = f"{name}.pdf"
-                shutil.copy2(brochure_path, batch_dir / brochure_filename)
-                r["source_file"] = brochure_filename
-                brochure_url = _download_url(batch_id, brochure_filename)
-                for record in r["records"]:
-                    record["Link to Brochure"] = brochure_url
-                # Best-effort mirror to object storage (storage.upload is a
-                # no-op returning False if S3_BUCKET etc. aren't configured)
-                # so this link keeps working past Render's ephemeral disk
-                # being wiped on redeploy/restart, and past our own hourly
-                # local cleanup below — local disk stays the fast path,
-                # this is just the durable fallback /api/download reaches
-                # for when the local copy is already gone.
-                storage.upload(f"{batch_id}/{brochure_filename}", batch_dir / brochure_filename)
-            else:
-                r["source_file"] = None
+            source_path = r["_source_path"]
+            source_filename = f"{name}{source_path.suffix.lower()}"
+            shutil.copy2(source_path, batch_dir / source_filename)
+            r["source_file"] = source_filename
+            source_url = _download_url(batch_id, source_filename)
+            for record in r["records"]:
+                record["Link to Brochure"] = source_url
 
             write_xlsx(batch_dir / r["output_file"], r["records"], sheet_title=name)
+
+            # Best-effort mirror to object storage (storage.upload is a
+            # no-op returning False if S3_BUCKET etc. aren't configured) so
+            # these download links keep working past Render's ephemeral
+            # disk being wiped on redeploy/restart, and past our own
+            # hourly local cleanup below — local disk stays the fast path,
+            # this is just the durable fallback /api/download reaches for
+            # when the local copy is already gone.
+            storage.upload(f"{batch_id}/{source_filename}", batch_dir / source_filename)
             storage.upload(f"{batch_id}/{r['output_file']}", batch_dir / r["output_file"])
 
         response_files = [
@@ -180,11 +194,12 @@ def download(batch_id, filename):
     file_path = (OUTPUT_DIR / safe_batch / safe_name).resolve()
     ext = Path(safe_name).suffix.lower()
     mimetype = CONTENT_TYPES.get(ext, "application/octet-stream")
+    disposition = "inline" if ext in INLINE_EXTENSIONS else "attachment"
 
     if OUTPUT_DIR.resolve() in file_path.parents and file_path.exists():
         # Fast path: still on local disk (recent batch, same instance
         # that generated it).
-        response = send_file(file_path, mimetype=mimetype, as_attachment=True, download_name=safe_name)
+        response = send_file(file_path, mimetype=mimetype, as_attachment=(disposition == "attachment"), download_name=safe_name)
     else:
         # Local copy is gone — either Render redeployed/restarted since
         # (wiping its ephemeral disk) or our own hourly cleanup ran.
@@ -196,10 +211,12 @@ def download(batch_id, filename):
             return jsonify({"error": "File not found"}), 404
         response = Response(data, mimetype=mimetype)
 
-    # Always a normal named download, never inline — set explicitly
-    # (quoted) rather than trusting send_file's default formatting alone,
-    # so the header is deterministic regardless of Werkzeug version quirks.
-    response.headers["Content-Disposition"] = f'attachment; filename="{safe_name}"'
+    # Set this explicitly (quoted) rather than trusting send_file's default
+    # formatting alone, so the header is deterministic regardless of
+    # Werkzeug version quirks — this is the header a browser actually reads
+    # to recognize a completed download's real filename/extension, and
+    # inline vs. attachment decides whether it opens in-browser or downloads.
+    response.headers["Content-Disposition"] = f'{disposition}; filename="{safe_name}"'
     return response
 
 
