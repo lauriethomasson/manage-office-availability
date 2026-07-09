@@ -17,15 +17,12 @@ LINK_COLS = {"Link to Brochure", "Floor Plan", "High Res Images"}
 # Free-text columns that can run long enough to overflow into neighboring
 # cells — wrapped within their own cell instead, with row height grown to fit.
 WRAP_COLS = {"Special Features", "Contacts", "Assigned Agents"}
-# Row height is shared across the whole row (an Excel/xlsx constraint, not
-# something we control) — when a wrapped cell grows a row, every other cell
-# in that row grows with it. Default vertical alignment is bottom, which
-# makes short-content cells (e.g. Property Postcode, Size (sq ft)) sit in
-# empty space at the bottom of a tall row instead of lining up with the top
-# of the wrapped text — so every data cell gets top alignment for wrapped
-# columns, and centered (both axes) everywhere else.
+# Every cell is centered on both axes, including the wrapped long-text
+# columns (Special Features/Contacts/Assigned Agents) — those just add
+# wrap_text on top of the same centering, so alignment is consistent
+# across every column rather than a mix of "center" and "top".
 CENTER_ALIGNMENT = Alignment(horizontal="center", vertical="center")
-WRAP_ALIGNMENT = Alignment(horizontal="center", wrap_text=True, vertical="top")
+WRAP_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
 LINE_HEIGHT = 15  # approx. points needed per wrapped line at 11pt Calibri
 
 
