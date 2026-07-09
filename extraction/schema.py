@@ -91,7 +91,9 @@ def normalize_record(record):
     # by extraction.pipeline.process_files once the provider name and
     # processing date are known, not derivable per-record here.
     out["External Ref"] = ""
-    out["Assigned Agents"] = out["Contacts"]
+    # Required field — a source with no contact/agent info at all (no
+    # Contacts value to mirror) would otherwise leave this blank.
+    out["Assigned Agents"] = out["Contacts"] or "Unknown"
     out["Property Address 1"] = out["Building"]
     out["Property Postcode"] = extract_postcode(out["Building"])
     out["Lat"] = ""
