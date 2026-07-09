@@ -5,3 +5,4 @@ __pycache__/
 output/
 *.extracted.html
 .geocode_cache.json
+.address_lookup_cache.json

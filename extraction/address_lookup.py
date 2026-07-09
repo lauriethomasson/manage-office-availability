@@ -5,7 +5,9 @@ from genuine search results — this is not a Nominatim query variant, it's
 a distinct fallback that finds new address information Nominatim never
 had to begin with.
 """
+import json
 import os
+from pathlib import Path
 
 # Confirmed empirically (2026-07) that Google Search grounding returns
 # 429 RESOURCE_EXHAUSTED on this project's free tier for both
@@ -15,6 +17,14 @@ import os
 # starts failing; Google's model/quota lineup for grounding shifts over time.
 MODEL = "gemini-2.5-flash"
 NOT_FOUND = "NOT_FOUND"
+
+# A web search is not perfectly deterministic — the same building name can
+# come back with a subtly different address (e.g. a neighboring postcode)
+# on different calls. Caching by building name pins whichever address was
+# found first, so repeated runs for the same building stay consistent
+# instead of drifting between calls.
+CACHE_PATH = Path(__file__).resolve().parent.parent / ".address_lookup_cache.json"
+_cache = None
 
 
 def find_address(building_name, context_hint="a commercial office building in London, UK"):
@@ -27,6 +37,18 @@ def find_address(building_name, context_hint="a commercial office building in Lo
     if not building_name:
         return None
 
+    cache = _load_cache()
+    key = building_name.lower()
+    if key in cache:
+        return cache[key]
+
+    address = _search(building_name, context_hint)
+    cache[key] = address
+    _save_cache(cache)
+    return address
+
+
+def _search(building_name, context_hint):
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
@@ -67,3 +89,26 @@ def find_address(building_name, context_hint="a commercial office building in Lo
     # Guard against the model adding anything beyond the single line asked
     # for despite instructions.
     return text.splitlines()[0].strip().strip('"')
+
+
+def _load_cache():
+    global _cache
+    if _cache is not None:
+        return _cache
+    if CACHE_PATH.exists():
+        try:
+            _cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            _cache = {}
+    else:
+        _cache = {}
+    return _cache
+
+
+def _save_cache(cache):
+    global _cache
+    _cache = cache
+    try:
+        CACHE_PATH.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass

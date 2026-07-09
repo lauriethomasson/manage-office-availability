@@ -7,7 +7,7 @@ separate (one output spreadsheet per source file, not one combined master).
 """
 from datetime import date
 
-from .address import spelled_number_to_digits
+from .address import extract_postcode, spelled_number_to_digits
 from .address_lookup import find_address as find_address_via_web_search
 from .file_readers import read_file
 from .geocode import geocode
@@ -175,6 +175,15 @@ def _geocode_records(records, filename):
                 web_query = _geocode_query({"Property Address 1": web_address})
                 web_lat, web_lng, web_postcode, web_error = geocode(web_query)
                 if web_lat is not None:
+                    # Prefer the postcode actually present in the found
+                    # address text over Nominatim's address-breakdown
+                    # postcode — confirmed empirically that Nominatim can
+                    # tag a wide building polygon with a different, coarser
+                    # postcode than the specific address searched for (e.g.
+                    # "11 St John Street" geocodes to a building spanning
+                    # house numbers 11-33, whose OSM postcode, EC1M 4NX,
+                    # doesn't match number 11's real postcode).
+                    web_postcode = extract_postcode(web_address) or web_postcode
                     query, lat, lng, geo_postcode, error = web_query, web_lat, web_lng, web_postcode, web_error
                     from_web_search = True
                 else:
