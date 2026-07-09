@@ -9,6 +9,8 @@ from pathlib import Path
 
 import requests
 
+from .address import extract_postcode
+
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 USER_AGENT = "manage-office-availability/1.0 (contact: team@spacepoint.co.uk)"
 MIN_INTERVAL_SECONDS = 1.0
@@ -21,30 +23,34 @@ _last_request_at = 0.0
 
 
 def geocode(address):
-    """Look up (lat, lng) for a free-text address via Nominatim.
+    """Look up (lat, lng, postcode) for a free-text address via Nominatim.
 
-    Returns (lat, lng, error): lat/lng are floats, or None if no confident
-    match was found; error is a short human-readable reason (never raises —
-    a network failure is reported the same way as "no match", so callers
-    can always just leave Lat/Lng blank on error rather than guessing).
+    Returns (lat, lng, postcode, error): lat/lng are floats, or None if no
+    confident match was found; postcode is whatever Nominatim's address
+    breakdown reports for the match (normalized the same way as
+    extraction.address.extract_postcode), or "" if it didn't include one —
+    a useful fallback for sources whose own address text has no postcode
+    at all. error is a short human-readable reason (never raises — a
+    network failure is reported the same way as "no match", so callers can
+    always just leave Lat/Lng/postcode blank on error rather than guessing).
 
     Results are cached on disk keyed by the normalized address string, so
     the same building is never re-geocoded across runs.
     """
     address = (address or "").strip()
     if not address:
-        return None, None, "No address to geocode"
+        return None, None, "", "No address to geocode"
 
     cache = _load_cache()
     key = _cache_key(address)
     if key in cache:
         hit = cache[key]
-        return hit.get("lat"), hit.get("lng"), hit.get("error")
+        return hit.get("lat"), hit.get("lng"), hit.get("postcode", ""), hit.get("error")
 
-    lat, lng, error = _fetch(address)
-    cache[key] = {"lat": lat, "lng": lng, "error": error}
+    lat, lng, postcode, error = _fetch(address)
+    cache[key] = {"lat": lat, "lng": lng, "postcode": postcode, "error": error}
     _save_cache(cache)
-    return lat, lng, error
+    return lat, lng, postcode, error
 
 
 def _fetch(address):
@@ -52,22 +58,29 @@ def _fetch(address):
     try:
         resp = requests.get(
             NOMINATIM_URL,
-            params={"q": address, "format": "json", "limit": 1},
+            # addressdetails=1 gets a structured breakdown (road, postcode,
+            # city, ...) alongside the match, so we can fall back to
+            # Nominatim's postcode when the source text didn't have one.
+            params={"q": address, "format": "json", "limit": 1, "addressdetails": 1},
             headers={"User-Agent": USER_AGENT},
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
         results = resp.json()
     except Exception as e:
-        return None, None, f"Geocoding request failed: {e}"
+        return None, None, "", f"Geocoding request failed: {e}"
 
     if not results:
-        return None, None, "No geocoding match found for this address"
+        return None, None, "", "No geocoding match found for this address"
 
     try:
-        return float(results[0]["lat"]), float(results[0]["lon"]), None
+        lat = float(results[0]["lat"])
+        lng = float(results[0]["lon"])
     except (KeyError, ValueError, TypeError) as e:
-        return None, None, f"Unexpected geocoding response shape: {e}"
+        return None, None, "", f"Unexpected geocoding response shape: {e}"
+
+    postcode = extract_postcode((results[0].get("address") or {}).get("postcode", ""))
+    return lat, lng, postcode, None
 
 
 def _throttle():

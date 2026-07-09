@@ -1,4 +1,5 @@
 """Writes a single source's extracted records to a formatted .xlsx."""
+import math
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -13,6 +14,11 @@ CURRENCY_COLS = {"Marketing Price (Based on Min Term) PCM", "Marketing Price (Ba
 NUMBER_COLS = {"Size (sq ft)", "Desks (max)"}
 COORDINATE_COLS = {"Lat", "Lng"}
 LINK_COLS = {"Link to Brochure", "Floor Plan", "High Res Images"}
+# Free-text columns that can run long enough to overflow into neighboring
+# cells — wrapped within their own cell instead, with row height grown to fit.
+WRAP_COLS = {"Special Features", "Contacts", "Assigned Agents"}
+WRAP_ALIGNMENT = Alignment(wrap_text=True, vertical="top")
+LINE_HEIGHT = 15  # approx. points needed per wrapped line at 11pt Calibri
 
 
 def write_xlsx(path, records, sheet_title="Listings"):
@@ -47,8 +53,27 @@ def write_xlsx(path, records, sheet_title="Listings"):
             elif col_name in LINK_COLS and isinstance(val, str) and val.startswith("http"):
                 cell.hyperlink = val
                 cell.font = Font(color="FF0563C1", underline="single")
+            elif col_name in WRAP_COLS:
+                cell.alignment = WRAP_ALIGNMENT
             max_len = max(max_len, len(str(val)) if val is not None else 0)
         ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 45)
+
+    # wrap_text alone doesn't make Excel grow the row to fit — that's a
+    # rendering computation Excel only does when a human triggers "AutoFit
+    # Row Height", not on file load. So estimate wrapped line count from the
+    # now-final column widths and set row height explicitly.
+    wrap_col_letters = [get_column_letter(i) for i, c in enumerate(COLUMNS, start=1) if c in WRAP_COLS]
+    for row_idx in range(2, last_row + 1):
+        max_lines = 1
+        for letter in wrap_col_letters:
+            cell = ws[f"{letter}{row_idx}"]
+            text = str(cell.value) if cell.value is not None else ""
+            if not text:
+                continue
+            width = ws.column_dimensions[letter].width or 10
+            max_lines = max(max_lines, math.ceil(len(text) / max(width, 1)))
+        if max_lines > 1:
+            ws.row_dimensions[row_idx].height = max_lines * LINE_HEIGHT
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)

@@ -38,6 +38,17 @@ def extract_date(content):
         return None
 
 
+def resolve_source_date(content):
+    """Best-effort YYYY-MM-DD for when the source document was actually
+    created/sent, in priority order:
+      1. An email's Date header (the actual sent date) — extract_date().
+      2. PDF/DOCX metadata (creation date, then modified date, whichever
+         file_readers could read) — content["file_date"].
+    Returns None if neither is available anywhere — the caller should fall
+    back to the processing date as a last resort rather than guessing."""
+    return extract_date(content) or (content or {}).get("file_date")
+
+
 def make_unique_names(items):
     """items: list of (base_name, date_or_None), one per file, in order.
     Returns a list of final, collision-free names in the same order —

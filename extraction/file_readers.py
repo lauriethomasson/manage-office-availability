@@ -13,11 +13,14 @@ instead of crashing the whole batch.
 import csv
 import email
 import re
+from datetime import date as _date
 from email import policy
 from io import StringIO
 from pathlib import Path
 
 from bs4 import BeautifulSoup
+
+PDF_DATE_RE = re.compile(r"D:(\d{4})(\d{2})(\d{2})")
 
 
 def read_file(path):
@@ -62,9 +65,25 @@ def _clean_pdf_cell(cell):
 
 
 def _empty(**overrides):
-    base = {"text": "", "html": "", "links": [], "tables": []}
+    base = {"text": "", "html": "", "links": [], "tables": [], "file_date": None}
     base.update(overrides)
     return base
+
+
+def _parse_pdf_date(raw):
+    """PDF metadata dates look like "D:20260630101530+01'00'" — pull out
+    just the YYYY-MM-DD, ignoring the time/timezone. Returns None if `raw`
+    isn't present or doesn't match the expected format."""
+    if not raw:
+        return None
+    m = PDF_DATE_RE.match(raw)
+    if not m:
+        return None
+    year, month, day = (int(g) for g in m.groups())
+    try:
+        return _date(year, month, day).isoformat()
+    except ValueError:
+        return None
 
 
 def _read_pdf(path):
@@ -72,10 +91,15 @@ def _read_pdf(path):
 
     text_parts = []
     tables = []
+    file_date = None
     try:
         with pdfplumber.open(path) as pdf:
             if not pdf.pages:
                 raise ValueError("PDF has no pages")
+            metadata = pdf.metadata or {}
+            # Prefer CreationDate (closer to "when this was actually put
+            # together/sent") over ModDate, but take whichever parses.
+            file_date = _parse_pdf_date(metadata.get("CreationDate")) or _parse_pdf_date(metadata.get("ModDate"))
             for page in pdf.pages:
                 page_text = page.extract_text() or ""
                 if page_text:
@@ -90,7 +114,7 @@ def _read_pdf(path):
     text = "\n".join(text_parts).strip()
     if not text and not tables:
         raise ValueError("No extractable text found in PDF (it may be a scanned image)")
-    return _empty(text=text, tables=tables)
+    return _empty(text=text, tables=tables, file_date=file_date)
 
 
 def _read_docx(path):
@@ -113,7 +137,13 @@ def _read_docx(path):
     text = "\n".join(text_parts).strip()
     if not text:
         raise ValueError("No text found in DOCX")
-    return _empty(text=text, tables=tables)
+
+    file_date = None
+    for dt in (d.core_properties.created, d.core_properties.modified):
+        if dt:
+            file_date = dt.date().isoformat()
+            break
+    return _empty(text=text, tables=tables, file_date=file_date)
 
 
 def _read_xlsx(path):

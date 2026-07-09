@@ -10,7 +10,7 @@ from datetime import date
 from .file_readers import read_file
 from .geocode import geocode
 from .llm_fallback import LLMExtractionError, extract_with_llm
-from .naming import extract_date, resolve_provider_name
+from .naming import extract_date, resolve_provider_name, resolve_source_date
 from .rules import try_rules
 from .schema import normalize_record
 
@@ -78,7 +78,12 @@ def process_files(paths):
         _geocode_records(normalized, filename)
 
         provider_name = resolve_provider_name(rule_name, filename, llm_source_name)
-        external_ref = f"{provider_name}_{date.today().strftime('%Y-%m-%d')}"
+        # Prefer the source document's own date (email Date header, or PDF/
+        # DOCX metadata) over processing time, so External Ref reflects when
+        # the listing was actually sent/dated, not when someone happened to
+        # run this batch. Only falls back to today when neither is available.
+        ref_date = resolve_source_date(content) or date.today().strftime("%Y-%m-%d")
+        external_ref = f"{provider_name}_{ref_date}"
         for record in normalized:
             record["External Ref"] = external_ref
 
@@ -96,12 +101,20 @@ def _geocode_records(records, filename):
     geocode() caches on disk by address string, so repeat buildings (e.g.
     several floors in the same Knotel building) cost one lookup, not one
     per row. Failures are never fatal to the row — Lat/Lng are just left
-    blank, with a clear note printed for whoever's running the batch."""
+    blank, with a clear note printed for whoever's running the batch.
+
+    Also backfills Property Postcode from Nominatim's address breakdown
+    when the source text didn't have one (e.g. MetSpace's "9-10 Market
+    Place" has no postcode at all) — only as a fallback; a postcode already
+    parsed from the source text is never overwritten.
+    """
     for record in records:
         query = _geocode_query(record)
-        lat, lng, error = geocode(query)
+        lat, lng, geo_postcode, error = geocode(query)
         record["Lat"] = lat if lat is not None else ""
         record["Lng"] = lng if lng is not None else ""
+        if not record.get("Property Postcode") and geo_postcode:
+            record["Property Postcode"] = geo_postcode
         if error:
             message = f"[geocode] {filename}: could not geocode '{query or record.get('Property Address 1') or '(blank)'}': {error}"
             try:
