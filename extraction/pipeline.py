@@ -13,6 +13,7 @@ from .file_readers import read_file
 from .geocode import geocode
 from .llm_fallback import LLMExtractionError, extract_with_llm
 from .naming import extract_date, resolve_provider_name, resolve_source_date
+from .pdf_snapshot import snapshot_for_content
 from .rules import try_rules
 from .schema import normalize_record
 
@@ -36,6 +37,7 @@ def process_files(paths):
             "error": None,
             "provider_name": None,
             "date": None,
+            "brochure_path": None,
         }
         try:
             content = read_file(path)
@@ -49,6 +51,21 @@ def process_files(paths):
             result["error"] = f"Unexpected error reading file: {e}"
             results.append(result)
             continue
+
+        # Link to Brochure should always be a PDF, whatever the source
+        # type was. A PDF source needs nothing extra; anything else gets a
+        # readable snapshot PDF rendered from what was just extracted
+        # above (not a full-fidelity conversion — Render's plain Python
+        # buildpack has no LibreOffice/Word to do that with).
+        if path.suffix.lower() == ".pdf":
+            result["brochure_path"] = path
+        else:
+            snapshot_path = path.parent / f"{path.stem}.brochure.pdf"
+            try:
+                snapshot_for_content(snapshot_path, content, fallback_title=path.stem)
+                result["brochure_path"] = snapshot_path
+            except Exception as e:
+                print(f"[pdf_snapshot] failed to build a brochure PDF for {filename}: {e}")
 
         rule_name, raw_records = try_rules(content)
         llm_source_name = None
