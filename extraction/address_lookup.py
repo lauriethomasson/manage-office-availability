@@ -8,6 +8,7 @@ had to begin with.
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Confirmed empirically (2026-07) that Google Search grounding returns
 # 429 RESOURCE_EXHAUSTED on this project's free tier for both
@@ -17,6 +18,14 @@ from pathlib import Path
 # starts failing; Google's model/quota lineup for grounding shifts over time.
 MODEL = "gemini-2.5-flash"
 NOT_FOUND = "NOT_FOUND"
+
+# Confirmed (2026-07) that a single-source grounded answer can still be
+# wrong — three real cases (Porters Place, Elsley, Kent House) each
+# resolved to a plausible-looking but wrong address before this
+# safeguard existed. Requiring at least this many independent sources to
+# agree doesn't eliminate the risk (see MIN_INDEPENDENT_SOURCES test
+# notes), but it does reject a lot of thin, single-page answers outright.
+MIN_INDEPENDENT_SOURCES = 2
 
 # A web search is not perfectly deterministic — the same building name can
 # come back with a subtly different address (e.g. a neighboring postcode)
@@ -28,9 +37,13 @@ _cache = None
 
 
 def find_address(building_name, provider_name=None, context_hint="a commercial office building in London, UK"):
-    """Best-effort: returns a plain address string found via a real web
-    search, or None if unconfigured, the model couldn't confidently find
-    a real address for this specific building, or any error occurred.
+    """Best-effort: returns (address_or_none, sources) — address is a
+    plain address string found via a real web search, or None if
+    unconfigured, fewer than MIN_INDEPENDENT_SOURCES independent sources
+    backed it, the model couldn't confidently find one, or any error
+    occurred. sources is the list of distinct source sites (domain, or
+    page title when a real domain isn't resolvable from the grounding
+    response) the answer was based on — [] whenever address is None.
     Never raises — this is always an optional last-resort fallback, never
     something that should fail the batch.
 
@@ -40,21 +53,27 @@ def find_address(building_name, provider_name=None, context_hint="a commercial o
     building of the same name elsewhere. Confirmed empirically this
     matters: a bare-name search for "Elsley" alone found a building in
     Battersea (SW11 5LL), when the real GPE-managed "Elsley" is in
-    Fitzrovia (W1W 8BF) — adding "GPE Fully Managed" to the search fixed it.
+    Fitzrovia (W1W 8BF) — adding "GPE" to the search fixed it.
     """
     building_name = (building_name or "").strip()
     if not building_name:
-        return None
+        return None, []
 
     cache = _load_cache()
     key = f"{building_name.lower()}|{(provider_name or '').strip().lower()}"
     if key in cache:
-        return cache[key]
+        entry = cache[key]
+        # Tolerate the older cache format (a bare string or null, from
+        # before `sources` was tracked) rather than crashing on it.
+        if isinstance(entry, dict):
+            return entry.get("address"), entry.get("sources") or []
+        return entry, []
 
-    address, cacheable = _search(building_name, provider_name, context_hint)
-    # Only cache a genuine "no address found" answer from the model —
-    # never a transient failure (e.g. a 429 quota error, a network hiccup,
-    # no API key configured). Caching those would permanently poison this
+    address, sources, cacheable = _search(building_name, provider_name, context_hint)
+    # Only cache a genuine, confident answer from the model (found, or a
+    # deliberate "not enough sources"/"no address" rejection) — never a
+    # transient failure (e.g. a 429 quota error, a network hiccup, no API
+    # key configured). Caching those would permanently poison this
     # building/provider pair: it'd keep returning None on every future run
     # even after the quota resets or a key gets added, since the cache is
     # checked before ever calling the API again. Confirmed this was
@@ -62,25 +81,26 @@ def find_address(building_name, provider_name=None, context_hint="a commercial o
     # as null for Elsley/Kent House/City Tower/Elm Yard, silently blocking
     # retries.
     if cacheable:
-        cache[key] = address
+        cache[key] = {"address": address, "sources": sources}
         _save_cache(cache)
-    return address
+    return address, sources
 
 
 def _search(building_name, provider_name, context_hint):
-    """Returns (address_or_none, cacheable) — cacheable is False whenever
-    the reason for a None result is transient (should be retried on a
-    future run), True when the model gave a confident "no such address"
-    answer worth remembering."""
+    """Returns (address_or_none, sources, cacheable) — cacheable is False
+    whenever the reason for a None result is transient (should be retried
+    on a future run), True when the model gave a confident, final answer
+    (an address backed by enough sources, or a deliberate rejection)
+    worth remembering."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return None, False
+        return None, [], False
 
     try:
         from google import genai
         from google.genai import types
     except ImportError:
-        return None, False
+        return None, [], False
 
     subject = f'a building called "{building_name}"'
     if provider_name:
@@ -113,14 +133,62 @@ def _search(building_name, provider_name, context_hint):
         # answer, so not cacheable; the caller should be free to retry
         # this exact building/provider pair again next time.
         print(f"[address_lookup] web search failed for '{building_name}': {type(e).__name__}: {e}")
-        return None, False
+        return None, [], False
 
     text = (response.text or "").strip()
     if not text or text.upper().startswith(NOT_FOUND):
-        return None, True
+        return None, [], True
+
     # Guard against the model adding anything beyond the single line asked
     # for despite instructions.
-    return text.splitlines()[0].strip().strip('"'), True
+    address = text.splitlines()[0].strip().strip('"')
+    sources = _extract_sources(response)
+
+    if len(sources) < MIN_INDEPENDENT_SOURCES:
+        # A single thin source is exactly the failure mode that produced
+        # three confirmed wrong addresses (Porters Place, Elsley, Kent
+        # House) before this check existed — don't accept it just because
+        # the model sounded confident. Still a real, cacheable outcome
+        # (not a transient error) — the caller falls back to the bare-name
+        # Nominatim tier from here.
+        print(
+            f"[address_lookup] rejecting '{address}' for '{building_name}' — only "
+            f"{len(sources)} independent source(s) cited (need >= {MIN_INDEPENDENT_SOURCES}): {sources}"
+        )
+        return None, sources, True
+
+    return address, sources, True
+
+
+def _extract_sources(response):
+    """Best-effort list of distinct sources the grounding response
+    actually cited, for the minimum-sources check above and so a wrong
+    answer is traceable in the log/spreadsheet rather than an opaque
+    coordinate. Gemini's grounding chunks give a redirect URL through
+    Google's own domain, not the real source site, most of the time — so
+    this prefers the chunk's page title (which usually names the real
+    site) whenever the URL's own hostname isn't an independent domain."""
+    try:
+        metadata = response.candidates[0].grounding_metadata
+        chunks = metadata.grounding_chunks if metadata else None
+    except (AttributeError, IndexError):
+        return []
+    if not chunks:
+        return []
+
+    sources = []
+    for chunk in chunks:
+        web = getattr(chunk, "web", None)
+        if not web:
+            continue
+        uri = getattr(web, "uri", "") or ""
+        title = getattr(web, "title", "") or ""
+        host = urlparse(uri).netloc.lower()
+        is_real_domain = host and "google" not in host and "vertexaisearch" not in host
+        identity = host if is_real_domain else (title.strip() or uri)
+        if identity and identity not in sources:
+            sources.append(identity)
+    return sources
 
 
 def _load_cache():

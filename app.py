@@ -1,6 +1,7 @@
 import os
 import secrets
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -88,6 +89,21 @@ def index(token):
     if not _token_ok(token):
         abort(404)
     return render_template("index.html", access_token=ACCESS_TOKEN)
+
+
+@app.route("/api/version")
+def version():
+    """So "is the fix actually deployed" can be answered directly instead
+    of inferred from push timing — Render sets RENDER_GIT_COMMIT
+    automatically on deployed services; falls back to asking git directly
+    for local dev, where that env var isn't set."""
+    commit = os.environ.get("RENDER_GIT_COMMIT")
+    if not commit:
+        try:
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=BASE_DIR, text=True, timeout=5).strip()
+        except Exception:
+            commit = "unknown"
+    return jsonify({"commit": commit, "commit_short": commit[:7]})
 
 
 @app.route("/api/process", methods=["POST"])

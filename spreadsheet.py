@@ -3,10 +3,13 @@ import math
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from extraction.schema import COLUMNS
+
+LAT_COL_IDX = COLUMNS.index("Lat") + 1
 
 HEADER_FILL = PatternFill(start_color="FF1F2937", end_color="FF1F2937", fill_type="solid")
 HEADER_FONT = Font(bold=True, color="FFFFFFFF")
@@ -44,9 +47,18 @@ def write_xlsx(path, records, sheet_title="Listings"):
         cell.alignment = CENTER_ALIGNMENT
     ws.freeze_panes = "A2"
 
-    for record in records:
+    for row_idx, record in enumerate(records, start=2):
         row = [record.get(c, "") for c in COLUMNS]
         ws.append(row)
+        # extraction.pipeline stashes this whenever Lat/Lng/Property
+        # Postcode were derived via the web-search fallback (not read from
+        # the source) — surfaced here as a cell comment so the specific
+        # sources a "(Not in source text)" value was based on are visible
+        # directly in the spreadsheet, not just the console log.
+        sources = record.get("_geocode_sources")
+        if sources:
+            comment_text = "Address found via web search, based on:\n" + "\n".join(sources)
+            ws.cell(row=row_idx, column=LAT_COL_IDX).comment = Comment(comment_text, "manage-office-availability")
 
     last_row = ws.max_row
     for col_idx, col_name in enumerate(COLUMNS, start=1):

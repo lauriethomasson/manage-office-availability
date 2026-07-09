@@ -155,11 +155,12 @@ def _geocode_records(records, filename, provider_name):
 
         query = _geocode_query(record)
         derived_note = False
+        sources = []
 
         if is_bare_name:
             lat = lng = geo_postcode = None
             error = None
-            web_address = find_address_via_web_search(building, provider_name)
+            web_address, web_sources = find_address_via_web_search(building, provider_name)
             if web_address:
                 web_query = _geocode_query({"Property Address 1": web_address})
                 lat, lng, geo_postcode, error = geocode(web_query)
@@ -175,12 +176,14 @@ def _geocode_records(records, filename, provider_name):
                     # doesn't match number 11's real postcode).
                     geo_postcode = extract_postcode(web_address) or geo_postcode
                     derived_note = True
+                    sources = web_sources
 
             if lat is None:
-                # Web search found nothing (or GEMINI_API_KEY isn't set) —
-                # last resort: Nominatim on just the bare name. Same risk
-                # as before (a coincidental match elsewhere), so still
-                # flagged if it does find something.
+                # Web search found nothing confident enough (unconfigured,
+                # not enough independent sources, or genuinely not found)
+                # — last resort: Nominatim on just the bare name. Same
+                # risk as before (a coincidental match elsewhere), so
+                # still flagged if it does find something.
                 lat, lng, geo_postcode, error = geocode(query)
                 if lat is not None:
                     derived_note = True
@@ -211,9 +214,16 @@ def _geocode_records(records, filename, provider_name):
                 record["Lng"] = f"{lng} (Not in source text)"
                 if postcode_from_geocode:
                     record["Property Postcode"] = f"{geo_postcode} (Not in source text)"
+                # Surfaced in the spreadsheet too (spreadsheet.write_xlsx
+                # attaches this as a cell comment on Lat) — so a wrong
+                # answer is traceable to what it was actually based on,
+                # not just an opaque coordinate.
+                if sources:
+                    record["_geocode_sources"] = sources
+                sources_note = f" Sources: {'; '.join(sources)}." if sources else ""
                 _safe_print(
                     f"[geocode] (Not in source text) {filename}: '{building}' -> '{query}': "
-                    f"lat={lat}, lng={lng}. No street/postcode in the source — verify before relying on it."
+                    f"lat={lat}, lng={lng}.{sources_note} No street/postcode in the source — verify before relying on it."
                 )
             else:
                 record["Lat"] = lat
