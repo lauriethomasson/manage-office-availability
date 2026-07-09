@@ -75,11 +75,21 @@ parser added to `extraction/rules/`.
    The link carries the access token as a query param (`?token=...`)
    rather than relying on the page's own JS header, since clicking a
    hyperlink in Excel opens a plain browser navigation with no custom
-   headers. This shares the same lifetime as the generated spreadsheets
-   themselves (see [Multi-user behavior](#multi-user-behavior)) — the
-   link stops working once its batch folder is cleaned up or the
-   instance restarts, so it's for "where did this come from" during/soon
-   after a processing run, not long-term archival.
+   headers.
+
+   `/api/download` always tries local disk first (fast path — the batch
+   that just ran). If the local copy is gone — Render's free-tier disk is
+   wiped on every redeploy/restart, and our own hourly cleanup deletes
+   local batch folders regardless (see [Multi-user
+   behavior](#multi-user-behavior)) — it falls back to object storage
+   (`storage.py`) if configured (see [Persistent storage
+   (optional)](#persistent-storage-optional)), which isn't tied to the
+   instance's disk at all. Without object storage configured, the link
+   really does only last for that hour/until the next redeploy —
+   "where did this come from" during/soon after a processing run, not
+   long-term archival. `Floor Plan`/`High Res Images` are left as plain,
+   non-clickable text for now (whatever URL, if any, a source document
+   itself provided) — not reliable enough yet to treat as real links.
 
 ## Target schema
 
@@ -225,8 +235,10 @@ regardless, so nothing here is meant to persist long-term.
 - **750 free instance-hours/month** across all your free services —
   effectively unlimited for a low-traffic internal tool used by a few
   people, since a spun-down service doesn't consume hours.
-- **No persistent disk on the free tier** — not an issue here, since
-  nothing needs to survive a restart (see above).
+- **No persistent disk on the free tier**, and the disk resets on every
+  deploy/restart even on paid tiers — this is why `Link to Brochure`
+  needs [object storage](#persistent-storage-optional) to keep working
+  past that; see there if you want those links to actually last.
 - **Outbound bandwidth and build minutes** are generously capped on the
   free tier; a handful of users uploading office-listing documents won't
   come close.
@@ -234,6 +246,48 @@ regardless, so nothing here is meant to persist long-term.
   paid instance stays running), or if you need more than 750 hours/month
   across free services (unlikely for this use case). Render's cheapest
   paid tier is a few dollars/month.
+
+### Persistent storage (optional)
+
+Without this, `Link to Brochure` (and the generated spreadsheet's own
+download link) only work for about an hour, or until the next
+redeploy/restart, whichever comes first — Render's disk (free tier or
+paid) doesn't survive either. `storage.py` adds an optional mirror to any
+S3-compatible object store, which isn't tied to the instance's disk at
+all — `/api/download` falls back to it automatically whenever the local
+copy is gone.
+
+It's entirely inert until configured: no env vars set means every
+`storage` call is a no-op, and the app behaves exactly as if this feature
+didn't exist (local disk only, same lifetime as before).
+
+**Recommended: [Cloudflare R2](https://developers.cloudflare.com/r2/)**
+— S3-compatible API, free tier covers this app's volume completely (10GB
+storage, **no egress fees** — S3's per-GB download charges are the part
+that usually surprises people later), no separate Render plan upgrade
+needed.
+
+1. Create an R2 bucket in the Cloudflare dashboard.
+2. Create an R2 API token (Account Home → R2 → Manage API Tokens) scoped
+   to that bucket, with read+write permission.
+3. Set these environment variables (Render dashboard → Environment, or
+   your local `.env`):
+   ```
+   S3_BUCKET=<your-bucket-name>
+   S3_ENDPOINT_URL=https://<account_id>.r2.cloudflarestorage.com
+   S3_ACCESS_KEY_ID=<from the API token>
+   S3_SECRET_ACCESS_KEY=<from the API token>
+   S3_REGION=auto
+   ```
+
+**Alternative: AWS S3** — same env vars, but omit `S3_ENDPOINT_URL`
+(boto3 uses AWS's own regional endpoint) and set `S3_REGION` to a real
+AWS region (e.g. `eu-west-2`). Costs a small amount per GB stored/served
+(pennies/month at this volume) rather than R2's free tier.
+
+Either way, nothing else in the app changes — same `Link to Brochure`
+URLs, same access-token gating (the bucket itself stays private; only
+this app's own credentials can read/write it).
 
 ## Notes
 

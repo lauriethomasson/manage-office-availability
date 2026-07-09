@@ -8,4 +8,5 @@ python-docx==1.2.0
 pandas==3.0.3
 openpyxl==3.1.5
 requests==2.32.3
+boto3==1.40.0
 gunicorn==26.0.0

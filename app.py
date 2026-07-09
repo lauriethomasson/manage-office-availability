@@ -8,10 +8,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from flask import Flask, abort, jsonify, render_template, request, send_file
+from flask import Flask, Response, abort, jsonify, render_template, request, send_file
 
 load_dotenv()
 
+import storage
 from extraction.naming import make_unique_names
 from extraction.pipeline import process_files
 from spreadsheet import write_xlsx
@@ -147,6 +148,16 @@ def process():
 
             write_xlsx(batch_dir / r["output_file"], r["records"], sheet_title=name)
 
+            # Best-effort mirror to object storage (storage.upload is a
+            # no-op returning False if S3_BUCKET etc. aren't configured) so
+            # these download links keep working past Render's ephemeral
+            # disk being wiped on redeploy/restart, and past our own
+            # hourly local cleanup below — local disk stays the fast path,
+            # this is just the durable fallback /api/download reaches for
+            # when the local copy is already gone.
+            storage.upload(f"{batch_id}/{source_filename}", batch_dir / source_filename)
+            storage.upload(f"{batch_id}/{r['output_file']}", batch_dir / r["output_file"])
+
         response_files = [
             {
                 "filename": r["filename"],
@@ -181,12 +192,25 @@ def download(batch_id, filename):
     safe_batch = Path(batch_id).name
     safe_name = Path(filename).name  # strip any path components
     file_path = (OUTPUT_DIR / safe_batch / safe_name).resolve()
-    if OUTPUT_DIR.resolve() not in file_path.parents or not file_path.exists():
-        return jsonify({"error": "File not found"}), 404
-    ext = file_path.suffix.lower()
+    ext = Path(safe_name).suffix.lower()
     mimetype = CONTENT_TYPES.get(ext, "application/octet-stream")
     disposition = "inline" if ext in INLINE_EXTENSIONS else "attachment"
-    response = send_file(file_path, mimetype=mimetype, as_attachment=(disposition == "attachment"), download_name=safe_name)
+
+    if OUTPUT_DIR.resolve() in file_path.parents and file_path.exists():
+        # Fast path: still on local disk (recent batch, same instance
+        # that generated it).
+        response = send_file(file_path, mimetype=mimetype, as_attachment=(disposition == "attachment"), download_name=safe_name)
+    else:
+        # Local copy is gone — either Render redeployed/restarted since
+        # (wiping its ephemeral disk) or our own hourly cleanup ran.
+        # Fall back to object storage, which isn't tied to this instance's
+        # disk at all (storage.fetch returns None if unconfigured or the
+        # object genuinely doesn't exist there either).
+        data = storage.fetch(f"{safe_batch}/{safe_name}")
+        if data is None:
+            return jsonify({"error": "File not found"}), 404
+        response = Response(data, mimetype=mimetype)
+
     # Set this explicitly (quoted) rather than trusting send_file's default
     # formatting alone, so the header is deterministic regardless of
     # Werkzeug version quirks — this is the header a browser actually reads
