@@ -302,6 +302,11 @@ Whichever you pick, nothing else in the app changes — same `Link to
 Brochure` URLs, same access-token gating (the bucket itself stays
 private; only this app's own credentials can read/write it).
 
+Verified end-to-end against the real B2 bucket in production: uploaded a
+file, restarted the service (wiping its local disk), and the exact same
+download link still returned the original file afterward — byte-for-byte
+identical, correct `Content-Type`/`Content-Disposition` — served from B2.
+
 ## Notes
 
 - Outbound network calls: the Gemini API (only for files that need the
