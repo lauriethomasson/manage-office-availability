@@ -21,6 +21,25 @@ OUTPUT_DIR = BASE_DIR / "output"
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xls", ".csv", ".eml", ".html", ".htm"}
 BATCH_MAX_AGE_SECONDS = 60 * 60  # clean up old batch output dirs after an hour
 
+# Explicit Content-Type per extension for /api/download, rather than
+# relying on send_file's default (Python's mimetypes module, which is
+# backed by the OS's own registry/mime.types and is NOT consistent across
+# platforms — e.g. .eml resolves to message/rfc822 via the Windows registry
+# on a dev machine, but a bare Linux container like Render's often has no
+# entry for it at all and falls back to application/octet-stream). A
+# browser treating a download as unrecognized/unconfirmed rather than a
+# normal, openable file is exactly the kind of symptom that mismatch causes.
+CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".csv": "text/csv",
+    ".eml": "message/rfc822",
+    ".html": "text/html",
+    ".htm": "text/html",
+}
+
 # Set in the hosting platform's environment variables (never committed). If
 # unset, the app runs "open" with no path/token gating — fine for local dev,
 # but you MUST set this before deploying anywhere reachable by other people.
@@ -155,7 +174,14 @@ def download(batch_id, filename):
     file_path = (OUTPUT_DIR / safe_batch / safe_name).resolve()
     if OUTPUT_DIR.resolve() not in file_path.parents or not file_path.exists():
         return jsonify({"error": "File not found"}), 404
-    return send_file(file_path, as_attachment=True, download_name=safe_name)
+    mimetype = CONTENT_TYPES.get(file_path.suffix.lower(), "application/octet-stream")
+    response = send_file(file_path, mimetype=mimetype, as_attachment=True, download_name=safe_name)
+    # Set this explicitly (quoted) rather than trusting send_file's default
+    # formatting alone, so the header is deterministic regardless of
+    # Werkzeug version quirks — this is the header a browser actually reads
+    # to recognize a completed download's real filename/extension.
+    response.headers["Content-Disposition"] = f'attachment; filename="{safe_name}"'
+    return response
 
 
 def _cleanup_old_batches():

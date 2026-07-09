@@ -7,6 +7,7 @@ separate (one output spreadsheet per source file, not one combined master).
 """
 from datetime import date
 
+from .address import spelled_number_to_digits
 from .file_readers import read_file
 from .geocode import geocode
 from .llm_fallback import LLMExtractionError, extract_with_llm
@@ -111,6 +112,19 @@ def _geocode_records(records, filename):
     for record in records:
         query = _geocode_query(record)
         lat, lng, geo_postcode, error = geocode(query)
+
+        # Nominatim can't match a building number spelled out in words
+        # (e.g. "Thirty One Alfred Place" for "31 Alfred Place") — if the
+        # direct lookup found nothing, retry once with that leading number
+        # word converted to digits before giving up.
+        if lat is None:
+            digit_address = spelled_number_to_digits(record.get("Property Address 1") or "")
+            if digit_address:
+                retry_query = _geocode_query({**record, "Property Address 1": digit_address})
+                retry_lat, retry_lng, retry_postcode, retry_error = geocode(retry_query)
+                if retry_lat is not None:
+                    query, lat, lng, geo_postcode, error = retry_query, retry_lat, retry_lng, retry_postcode, retry_error
+
         record["Lat"] = lat if lat is not None else ""
         record["Lng"] = lng if lng is not None else ""
         if not record.get("Property Postcode") and geo_postcode:

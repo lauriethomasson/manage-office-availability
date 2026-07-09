@@ -22,9 +22,10 @@ WRAP_COLS = {"Special Features", "Contacts", "Assigned Agents"}
 # in that row grows with it. Default vertical alignment is bottom, which
 # makes short-content cells (e.g. Property Postcode, Size (sq ft)) sit in
 # empty space at the bottom of a tall row instead of lining up with the top
-# of the wrapped text — so every data cell gets top alignment as a baseline.
-TOP_ALIGNMENT = Alignment(vertical="top")
-WRAP_ALIGNMENT = Alignment(wrap_text=True, vertical="top")
+# of the wrapped text — so every data cell gets top alignment for wrapped
+# columns, and centered (both axes) everywhere else.
+CENTER_ALIGNMENT = Alignment(horizontal="center", vertical="center")
+WRAP_ALIGNMENT = Alignment(horizontal="center", wrap_text=True, vertical="top")
 LINE_HEIGHT = 15  # approx. points needed per wrapped line at 11pt Calibri
 
 
@@ -37,7 +38,7 @@ def write_xlsx(path, records, sheet_title="Listings"):
     for cell in ws[1]:
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
-        cell.alignment = Alignment(vertical="center")
+        cell.alignment = CENTER_ALIGNMENT
     ws.freeze_panes = "A2"
 
     for record in records:
@@ -51,7 +52,7 @@ def write_xlsx(path, records, sheet_title="Listings"):
         for row_idx in range(2, last_row + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
             val = cell.value
-            cell.alignment = TOP_ALIGNMENT
+            cell.alignment = CENTER_ALIGNMENT
             if col_name in CURRENCY_COLS and isinstance(val, (int, float)) and val != "":
                 cell.number_format = "£#,##0.00" if col_name.endswith("PSF") else "£#,##0"
             elif col_name in NUMBER_COLS and isinstance(val, (int, float)) and val != "":
