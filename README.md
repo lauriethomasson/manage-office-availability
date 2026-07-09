@@ -129,10 +129,45 @@ compatibility (matching the "Loader" sheet of
   `process_files` batch. Results are cached on disk in
   `.geocode_cache.json` (gitignored) so the same building is never
   re-geocoded across runs, and requests are throttled to Nominatim's
-  1/second usage policy with a descriptive `User-Agent`. A failed lookup
-  (no match, or a network error) leaves `Lat`/`Lng` blank for that row and
-  prints a `[geocode] ...` note to the console — it never blocks the rest
-  of the batch or guesses coordinates.
+  1/second usage policy with a descriptive `User-Agent`.
+
+  `Property Postcode`/`Lat`/`Lng` are required fields, so a failed direct
+  lookup doesn't just give up — `extraction/pipeline._geocode_records`
+  works through several fallback tiers, in order, each logged distinctly
+  (`[geocode] ...`) so which tier produced a result is always traceable:
+  1. A spelled-out leading building number converted to digits (e.g.
+     "Thirty One Alfred Place" → "31 Alfred Place").
+  2. Nominatim again with nothing but the bare building name + "London,
+     UK", dropping any postcode/extra detail that may have made a fuller
+     query fail.
+  3. An actual web search for the building's real address — Gemini with
+     Google Search grounding (`extraction/address_lookup.py`), not
+     another Nominatim query — since Nominatim can only match an address
+     it's given; retrying it with variations of a name it already failed
+     on can't discover an address it was never told. Confirmed against a
+     real gap (BC's "Porters Place", which has no Area/street context in
+     the source at all): no Nominatim phrasing found it, but a real web
+     search did.
+
+  A bare building name (no house number/street) is inherently a weaker
+  signal than a full address — not guaranteed unique, and confirmed
+  empirically that searching just a bare name with no city qualifier at
+  all can match a same-named place on the other side of the world. So a
+  match from fallback tier 2 gets `" (unverified)"` appended to `Lat`/
+  `Lng` (and `Property Postcode`, if that was also backfilled from the
+  same lookup) — visible in the spreadsheet itself, not just the console
+  log. If every tier still finds nothing, the cell shows literal text
+  `"Needs manual lookup"` instead of being left blank. None of this ever
+  blocks the rest of the batch.
+
+  Note: as of testing this (2026-07), Google Search grounding returned
+  429 RESOURCE_EXHAUSTED on this project's free tier for
+  `gemini-3.1-flash-lite` and `gemini-2.0-flash` — only `gemini-2.5-flash`
+  had free grounding quota available, so `address_lookup.py` uses that
+  model specifically (the rest of this app's Gemini calls, which don't
+  use grounding, use `gemini-3.1-flash-lite` and are unaffected). Worth
+  re-checking if this starts failing later — Google's model/quota lineup
+  for grounding shifts over time.
 
 ## Adding a new source
 
