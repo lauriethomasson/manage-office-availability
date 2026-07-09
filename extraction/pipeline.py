@@ -108,6 +108,18 @@ def _geocode_records(records, filename):
     when the source text didn't have one (e.g. MetSpace's "9-10 Market
     Place" has no postcode at all) — only as a fallback; a postcode already
     parsed from the source text is never overwritten.
+
+    Lat/Lng/Property Postcode are required fields, so as a last resort —
+    when nothing else matched — this retries with nothing but the bare
+    building name (+ "London, UK"), dropping any postcode/extra detail
+    that may have made the fuller query fail. That bare-name query is
+    inherently lower confidence: a name with no house number/street
+    (e.g. "Porters Place") isn't guaranteed unique, and confirmed
+    empirically that dropping the city/country context entirely can match
+    a same-named place on the other side of the world (bare "Porters
+    Place" resolves to a street in Barbados). Every match or failure that
+    came from this bare-name tier is flagged in the printed log line, and
+    it's never used to silently overwrite Property Address 1/Building.
     """
     for record in records:
         query = _geocode_query(record)
@@ -125,16 +137,44 @@ def _geocode_records(records, filename):
                 if retry_lat is not None:
                     query, lat, lng, geo_postcode, error = retry_query, retry_lat, retry_lng, retry_postcode, retry_error
 
+        building = (record.get("Property Address 1") or "").strip()
+        bare_query = _geocode_query({"Property Address 1": building}) if building else ""
+        # No house number/street in the source at all — a bare building
+        # name is inherently a weaker signal than a full street address,
+        # regardless of whether this attempt succeeds or fails.
+        low_confidence = bool(building) and not any(ch.isdigit() for ch in building)
+
+        if lat is None and bare_query and bare_query != query:
+            retry_lat, retry_lng, retry_postcode, retry_error = geocode(bare_query)
+            query = bare_query
+            if retry_lat is not None:
+                lat, lng, geo_postcode, error = retry_lat, retry_lng, retry_postcode, retry_error
+            else:
+                error = retry_error
+
         record["Lat"] = lat if lat is not None else ""
         record["Lng"] = lng if lng is not None else ""
         if not record.get("Property Postcode") and geo_postcode:
             record["Property Postcode"] = geo_postcode
-        if error:
-            message = f"[geocode] {filename}: could not geocode '{query or record.get('Property Address 1') or '(blank)'}': {error}"
-            try:
-                print(message)
-            except UnicodeEncodeError:
-                print(message.encode("ascii", "replace").decode("ascii"))
+
+        if lat is not None and low_confidence:
+            message = (
+                f"[geocode] LOW-CONFIDENCE MATCH {filename}: '{query}' — building name only, "
+                f"no street/postcode in the source. lat={lat}, lng={lng}. Risk of matching the "
+                f"wrong location if this name isn't unique — verify before relying on it."
+            )
+            _safe_print(message)
+        elif error:
+            prefix = "[geocode] (low-confidence, building-name-only) " if low_confidence else "[geocode] "
+            target = query or building or "(blank)"
+            _safe_print(f"{prefix}{filename}: could not geocode '{target}': {error}")
+
+
+def _safe_print(message):
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", "replace").decode("ascii"))
 
 
 def _geocode_query(record):
