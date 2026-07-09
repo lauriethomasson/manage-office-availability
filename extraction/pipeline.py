@@ -8,6 +8,7 @@ separate (one output spreadsheet per source file, not one combined master).
 from datetime import date
 
 from .address import spelled_number_to_digits
+from .address_lookup import find_address as find_address_via_web_search
 from .file_readers import read_file
 from .geocode import geocode
 from .llm_fallback import LLMExtractionError, extract_with_llm
@@ -120,6 +121,12 @@ def _geocode_records(records, filename):
     Place" resolves to a street in Barbados). Every match or failure that
     came from this bare-name tier is flagged in the printed log line, and
     it's never used to silently overwrite Property Address 1/Building.
+
+    If even that fails, this does an actual web search for the building's
+    real address (extraction.address_lookup, Gemini + Google Search
+    grounding) and geocodes that — a genuinely different fallback, not
+    another Nominatim query, since Nominatim can only match an address
+    it's given.
     """
     for record in records:
         query = _geocode_query(record)
@@ -152,19 +159,75 @@ def _geocode_records(records, filename):
             else:
                 error = retry_error
 
-        record["Lat"] = lat if lat is not None else ""
-        record["Lng"] = lng if lng is not None else ""
+        # Nominatim can only match an address it's given — retrying it
+        # with variations of the same building name can't discover
+        # information it never had. If nothing above found a match, do an
+        # actual web search (Gemini + Google Search grounding,
+        # extraction.address_lookup) for the building's real address, then
+        # geocode that. This is a genuinely different fallback, not another
+        # Nominatim query — confirmed empirically for "Porters Place" (a
+        # source with no Area/street context beyond the bare name): no
+        # Nominatim phrasing found it, but a real web search did.
+        from_web_search = False
+        if lat is None and building:
+            web_address = find_address_via_web_search(building)
+            if web_address:
+                web_query = _geocode_query({"Property Address 1": web_address})
+                web_lat, web_lng, web_postcode, web_error = geocode(web_query)
+                if web_lat is not None:
+                    query, lat, lng, geo_postcode, error = web_query, web_lat, web_lng, web_postcode, web_error
+                    from_web_search = True
+                else:
+                    error = web_error
+
+        postcode_from_geocode = False
         if not record.get("Property Postcode") and geo_postcode:
             record["Property Postcode"] = geo_postcode
+            postcode_from_geocode = True
 
-        if lat is not None and low_confidence:
-            message = (
-                f"[geocode] LOW-CONFIDENCE MATCH {filename}: '{query}' — building name only, "
-                f"no street/postcode in the source. lat={lat}, lng={lng}. Risk of matching the "
-                f"wrong location if this name isn't unique — verify before relying on it."
-            )
-            _safe_print(message)
-        elif error:
+        if lat is not None:
+            if from_web_search:
+                # A real street address was found via an actual web search
+                # for this specific building (not a coincidental Nominatim
+                # name match), then geocoded normally — treated as a
+                # confident result, distinctly logged so it's still
+                # traceable to this fallback tier.
+                record["Lat"] = lat
+                record["Lng"] = lng
+                _safe_print(
+                    f"[geocode] FOUND VIA WEB SEARCH {filename}: '{building}' had no address in the "
+                    f"source and no direct geocode match — found '{query}' via Gemini + Google Search "
+                    f"grounding. lat={lat}, lng={lng}."
+                )
+            elif low_confidence:
+                # A real match, but from the bare-name tier — still usable,
+                # but visibly marked in the spreadsheet itself (not just the
+                # console log) so it's distinguishable from a confident
+                # match without cross-checking anything. Property Postcode
+                # only gets the same marker when it came from this same
+                # low-confidence lookup — a postcode already present in the
+                # source text is left alone, since it isn't in question.
+                record["Lat"] = f"{lat} (unverified)"
+                record["Lng"] = f"{lng} (unverified)"
+                if postcode_from_geocode:
+                    record["Property Postcode"] = f"{geo_postcode} (unverified)"
+                _safe_print(
+                    f"[geocode] LOW-CONFIDENCE MATCH {filename}: '{query}' — building name only, "
+                    f"no street/postcode in the source. lat={lat}, lng={lng}. Risk of matching the "
+                    f"wrong location if this name isn't unique — verify before relying on it."
+                )
+            else:
+                record["Lat"] = lat
+                record["Lng"] = lng
+        else:
+            # Required fields — flag directly in the cell, not just the
+            # console log, so a genuine geocoding gap is visible to anyone
+            # opening the spreadsheet, distinguishable from a field that's
+            # blank for some other reason.
+            record["Lat"] = "Needs manual lookup"
+            record["Lng"] = "Needs manual lookup"
+            if not record.get("Property Postcode"):
+                record["Property Postcode"] = "Needs manual lookup"
             prefix = "[geocode] (low-confidence, building-name-only) " if low_confidence else "[geocode] "
             target = query or building or "(blank)"
             _safe_print(f"{prefix}{filename}: could not geocode '{target}': {error}")
