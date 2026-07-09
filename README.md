@@ -261,33 +261,46 @@ It's entirely inert until configured: no env vars set means every
 `storage` call is a no-op, and the app behaves exactly as if this feature
 didn't exist (local disk only, same lifetime as before).
 
-**Recommended: [Cloudflare R2](https://developers.cloudflare.com/r2/)**
-— S3-compatible API, free tier covers this app's volume completely (10GB
-storage, **no egress fees** — S3's per-GB download charges are the part
-that usually surprises people later), no separate Render plan upgrade
-needed.
+This app's Render deployment currently uses **Backblaze B2** (private
+bucket) — free tier covers 10GB storage with no egress fees, similar in
+spirit to Cloudflare R2 below. Any S3-compatible provider works the same
+way through the same five env vars; pick whichever's most convenient.
 
-1. Create an R2 bucket in the Cloudflare dashboard.
-2. Create an R2 API token (Account Home → R2 → Manage API Tokens) scoped
-   to that bucket, with read+write permission.
-3. Set these environment variables (Render dashboard → Environment, or
+**Backblaze B2** (currently in use):
+1. Create a private B2 bucket, then an "Application Key" scoped to it
+   (read+write) in the B2 dashboard.
+2. Set these environment variables (Render dashboard → Environment, or
    your local `.env`):
    ```
    S3_BUCKET=<your-bucket-name>
+   S3_ENDPOINT_URL=https://s3.<region>.backblazeb2.com
+   S3_ACCESS_KEY_ID=<the Application Key's keyID>
+   S3_SECRET_ACCESS_KEY=<the Application Key's own secret>
+   S3_REGION=<region, e.g. us-west-002>
+   ```
+   B2's S3-compatible API doesn't support recent botocore versions'
+   default request-checksum headers — `storage.py`'s client `Config`
+   already disables those (`request_checksum_calculation` /
+   `response_checksum_validation` set to `"when_required"`), which is
+   required for B2 specifically (AWS S3 and R2 don't need it, but it's
+   harmless for them too).
+
+**Cloudflare R2** (alternative — also free, no egress fees):
+   ```
+   S3_BUCKET=<your-bucket-name>
    S3_ENDPOINT_URL=https://<account_id>.r2.cloudflarestorage.com
-   S3_ACCESS_KEY_ID=<from the API token>
-   S3_SECRET_ACCESS_KEY=<from the API token>
+   S3_ACCESS_KEY_ID=<from an R2 API token scoped to that bucket>
+   S3_SECRET_ACCESS_KEY=<from the same token>
    S3_REGION=auto
    ```
 
-**Alternative: AWS S3** — same env vars, but omit `S3_ENDPOINT_URL`
-(boto3 uses AWS's own regional endpoint) and set `S3_REGION` to a real
-AWS region (e.g. `eu-west-2`). Costs a small amount per GB stored/served
-(pennies/month at this volume) rather than R2's free tier.
+**AWS S3** (alternative — small per-GB cost) — same env vars, but omit
+`S3_ENDPOINT_URL` (boto3 uses AWS's own regional endpoint) and set
+`S3_REGION` to a real AWS region (e.g. `eu-west-2`).
 
-Either way, nothing else in the app changes — same `Link to Brochure`
-URLs, same access-token gating (the bucket itself stays private; only
-this app's own credentials can read/write it).
+Whichever you pick, nothing else in the app changes — same `Link to
+Brochure` URLs, same access-token gating (the bucket itself stays
+private; only this app's own credentials can read/write it).
 
 ## Notes
 
