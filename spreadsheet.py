@@ -11,6 +11,7 @@ HEADER_FILL = PatternFill(start_color="FF1F2937", end_color="FF1F2937", fill_typ
 HEADER_FONT = Font(bold=True, color="FFFFFFFF")
 CURRENCY_COLS = {"Marketing Price (Based on Min Term) PCM", "Marketing Price (Based on Min Term) PSF"}
 NUMBER_COLS = {"Size (sq ft)", "Desks (max)"}
+COORDINATE_COLS = {"Lat", "Lng"}
 LINK_COLS = {"Link to Brochure", "Floor Plan", "High Res Images"}
 
 
@@ -41,6 +42,8 @@ def write_xlsx(path, records, sheet_title="Listings"):
                 cell.number_format = "£#,##0.00" if col_name.endswith("PSF") else "£#,##0"
             elif col_name in NUMBER_COLS and isinstance(val, (int, float)) and val != "":
                 cell.number_format = "#,##0"
+            elif col_name in COORDINATE_COLS and isinstance(val, (int, float)) and val != "":
+                cell.number_format = "0.000000"
             elif col_name in LINK_COLS and isinstance(val, str) and val.startswith("http"):
                 cell.hyperlink = val
                 cell.font = Font(color="FF0563C1", underline="single")

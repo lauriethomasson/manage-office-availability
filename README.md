@@ -77,6 +77,32 @@ assigned to this space", over what happened to be two name columns with
 no sub-header text of their own, but other sources (e.g. MetSpace) list
 three.
 
+Every spreadsheet also carries eight extra columns for Kato bulk-upload
+compatibility (matching the "Loader" sheet of
+`kato-disposals-loader-example-LATEST VERSION (3).xlsx`): `External Ref`,
+`Assigned Agents`, `Property Address 1`, `Property Postcode`, `Lat`,
+`Lng`, `For Sale`, `To Let`. These are derived, not extracted — see
+`normalize_record` in `extraction/schema.py`:
+- `External Ref` is always blank (assigned on Kato's side).
+- `Assigned Agents` mirrors `Contacts`.
+- `Property Address 1` mirrors `Building`, and `Property Postcode` is
+  parsed out of it with a UK postcode regex (`extraction/address.py`) —
+  left blank rather than guessed when no postcode is confidently present
+  (true for all current sources, whose `Building` text is usually just a
+  building/street name with no postcode).
+- `For Sale`/`To Let` are hardcoded `"No"`/`"Yes"` — every current source
+  is lettings, not sales.
+- `Lat`/`Lng` come from geocoding `Property Address 1` (+ postcode, +
+  ", London, UK" if not already implied) via OpenStreetMap Nominatim
+  (`extraction/geocode.py`), called once per unique address per
+  `process_files` batch. Results are cached on disk in
+  `.geocode_cache.json` (gitignored) so the same building is never
+  re-geocoded across runs, and requests are throttled to Nominatim's
+  1/second usage policy with a descriptive `User-Agent`. A failed lookup
+  (no match, or a network error) leaves `Lat`/`Lng` blank for that row and
+  prints a `[geocode] ...` note to the console — it never blocks the rest
+  of the batch or guesses coordinates.
+
 ## Adding a new source
 
 If a new sender's emails consistently fail to a rule and always land on
@@ -190,7 +216,14 @@ regardless, so nothing here is meant to persist long-term.
 
 ## Notes
 
-- The only outbound network call is to the Gemini API, and only for
-  files that need the LLM fallback.
+- Outbound network calls: the Gemini API (only for files that need the
+  LLM fallback), and OpenStreetMap Nominatim (for geocoding every
+  extracted listing's address into `Lat`/`Lng` — see [Target
+  schema](#target-schema)).
 - Generated spreadsheets live in `output/`, which — like `.env` — is
   gitignored: it's local, working-copy data, not something to version.
+- `.geocode_cache.json` (repo root, gitignored) persists geocoding
+  results across runs/restarts on a local machine. On Render's free tier
+  the disk is ephemeral (see [Deployment](#deployment-render)), so this
+  cache resets on every deploy/restart there — it still avoids
+  re-geocoding within a single running instance's lifetime.

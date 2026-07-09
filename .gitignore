@@ -4,3 +4,4 @@ __pycache__/
 .env
 output/
 *.extracted.html
+.geocode_cache.json
