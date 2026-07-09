@@ -39,6 +39,15 @@ CONTENT_TYPES = {
     ".html": "text/html",
     ".htm": "text/html",
 }
+# Extensions a browser can render natively — served as `inline` so
+# clicking the link opens it directly in the browser's own viewer
+# (e.g. Chrome/Edge's built-in PDF viewer), instead of downloading to disk
+# and handing off to the OS's default app for that extension, which is
+# what let a PDF get opened in Word rather than a PDF viewer. Types with
+# no native browser renderer (.eml, .docx, .xlsx, .xls, .csv) still need
+# `attachment` — there's no in-browser way to view those, they always have
+# to hand off to a desktop app, so at least force a clean, named download.
+INLINE_EXTENSIONS = {".pdf"}
 
 # Set in the hosting platform's environment variables (never committed). If
 # unset, the app runs "open" with no path/token gating — fine for local dev,
@@ -174,13 +183,16 @@ def download(batch_id, filename):
     file_path = (OUTPUT_DIR / safe_batch / safe_name).resolve()
     if OUTPUT_DIR.resolve() not in file_path.parents or not file_path.exists():
         return jsonify({"error": "File not found"}), 404
-    mimetype = CONTENT_TYPES.get(file_path.suffix.lower(), "application/octet-stream")
-    response = send_file(file_path, mimetype=mimetype, as_attachment=True, download_name=safe_name)
+    ext = file_path.suffix.lower()
+    mimetype = CONTENT_TYPES.get(ext, "application/octet-stream")
+    disposition = "inline" if ext in INLINE_EXTENSIONS else "attachment"
+    response = send_file(file_path, mimetype=mimetype, as_attachment=(disposition == "attachment"), download_name=safe_name)
     # Set this explicitly (quoted) rather than trusting send_file's default
     # formatting alone, so the header is deterministic regardless of
     # Werkzeug version quirks — this is the header a browser actually reads
-    # to recognize a completed download's real filename/extension.
-    response.headers["Content-Disposition"] = f'attachment; filename="{safe_name}"'
+    # to recognize a completed download's real filename/extension, and
+    # inline vs. attachment decides whether it opens in-browser or downloads.
+    response.headers["Content-Disposition"] = f'{disposition}; filename="{safe_name}"'
     return response
 
 

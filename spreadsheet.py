@@ -13,7 +13,13 @@ HEADER_FONT = Font(bold=True, color="FFFFFFFF")
 CURRENCY_COLS = {"Marketing Price (Based on Min Term) PCM", "Marketing Price (Based on Min Term) PSF"}
 NUMBER_COLS = {"Size (sq ft)", "Desks (max)"}
 COORDINATE_COLS = {"Lat", "Lng"}
-LINK_COLS = {"Link to Brochure", "Floor Plan", "High Res Images"}
+# Only Link to Brochure gets the clickable-hyperlink treatment — it's a
+# link we generate ourselves to a file we control and persist. Floor Plan
+# and High Res Images hold whatever URL (if any) a source document itself
+# provided, which isn't reliable yet, so for now they're left as plain
+# text rather than clickable links (there is no "Photo Link" column in
+# the current schema — only these two — so nothing to change there).
+LINK_COLS = {"Link to Brochure"}
 # Free-text columns that can run long enough to overflow into neighboring
 # cells — wrapped within their own cell instead, with row height grown to fit.
 WRAP_COLS = {"Special Features", "Contacts", "Assigned Agents"}
