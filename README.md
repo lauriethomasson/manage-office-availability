@@ -66,23 +66,16 @@ its generated spreadsheet, and a clear error message for anything that
 failed — so you can tell at a glance when a new source needs a proper
 parser added to `extraction/rules/`.
 
-5. **Link to Brochure** — always points to a PDF, whatever the source
-   file type was, for one consistent viewing experience across every
-   source. A PDF source is used as-is. Anything else (`.eml`, `.docx`,
-   `.xlsx`, `.xls`, `.csv`, `.html`/`.htm`) gets a readable PDF snapshot
-   rendered from what was already extracted (`extraction/pdf_snapshot.py`,
-   using `fpdf2` — a pure-Python PDF writer with no system dependencies,
-   since Render's plain Python buildpack has no LibreOffice/Word for a
-   real converter like `docx2pdf` to shell out to). `extraction/pipeline
-   .process_files` resolves this `brochure_path` per file right after
-   reading it, before extraction even runs. Every extracted row's `Link
-   to Brochure` column is set to an absolute URL back to it (`app.py`,
-   `_download_url`) — all rows from the same source file share the exact
-   same URL, since it identifies the source document, not a listing. The
-   link carries the access token as a query param (`?token=...`) rather
-   than relying on the page's own JS header, since clicking a hyperlink
-   in Excel opens a plain browser navigation with no custom headers.
-   Downloads are always a normal named attachment, never opened inline.
+5. **Link to Brochure** — a copy of the original uploaded file is saved
+   alongside its generated spreadsheet (as-is; an `.eml` stays a raw
+   `.eml`, no conversion), and every extracted row's `Link to Brochure`
+   column is set to an absolute URL back to it (`app.py`,
+   `_download_url`). All rows from the same source file share the exact
+   same URL, since it identifies the source document, not a listing.
+   The link carries the access token as a query param (`?token=...`)
+   rather than relying on the page's own JS header, since clicking a
+   hyperlink in Excel opens a plain browser navigation with no custom
+   headers.
 
    `/api/download` always tries local disk first (fast path — the batch
    that just ran). If the local copy is gone — Render's free-tier disk is
