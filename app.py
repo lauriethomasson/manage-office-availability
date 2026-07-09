@@ -40,6 +40,15 @@ CONTENT_TYPES = {
     ".html": "text/html",
     ".htm": "text/html",
 }
+# Extensions a browser can render natively — served as `inline` so
+# clicking Link to Brochure opens it directly in-browser instead of
+# downloading. PDFs use the browser's built-in PDF viewer. .html/.htm
+# covers the HTML brochure saved for .eml sources below (the email's own
+# HTML body, not a raw .eml) — it opens like the original email,
+# including images, since that markup already points at the sender's
+# hosted image URLs. DOCX/XLSX/CSV have no reliable native in-browser
+# renderer, so they're deliberately left out — normal downloads for those.
+INLINE_EXTENSIONS = {".pdf", ".html", ".htm"}
 
 # Set in the hosting platform's environment variables (never committed). If
 # unset, the app runs "open" with no path/token gating — fine for local dev,
@@ -122,16 +131,28 @@ def process():
         for r, name in zip(ok_results, unique_names):
             r["output_file"] = f"{name}.xlsx"
 
-            # Persist a copy of the original source file alongside the
-            # generated spreadsheet (as-is — an .eml stays a raw .eml, no
-            # conversion), and point every extracted row's "Link to
+            # Persist the brochure artifact alongside the generated
+            # spreadsheet, and point every extracted row's "Link to
             # Brochure" at it so the spreadsheet is traceable back to
             # where the data came from. Reuses the same collision-free
             # `name` the spreadsheet got, so it can't collide with another
             # source file in this batch.
+            #
+            # An .eml with an HTML body links to that HTML directly
+            # (extraction.pipeline already parsed it out, unmodified) —
+            # opens in-browser like the original email, images included,
+            # since the markup already points at the sender's hosted image
+            # URLs. There's nothing to render or convert. Everything else
+            # (PDF, DOCX, XLSX, CSV, a plain-text-only .eml) links to the
+            # original uploaded file as-is.
             source_path = r["_source_path"]
-            source_filename = f"{name}{source_path.suffix.lower()}"
-            shutil.copy2(source_path, batch_dir / source_filename)
+            email_html = r.get("email_html")
+            if email_html:
+                source_filename = f"{name}.html"
+                (batch_dir / source_filename).write_text(email_html, encoding="utf-8")
+            else:
+                source_filename = f"{name}{source_path.suffix.lower()}"
+                shutil.copy2(source_path, batch_dir / source_filename)
             r["source_file"] = source_filename
             source_url = _download_url(batch_id, source_filename)
             for record in r["records"]:
@@ -185,11 +206,12 @@ def download(batch_id, filename):
     file_path = (OUTPUT_DIR / safe_batch / safe_name).resolve()
     ext = Path(safe_name).suffix.lower()
     mimetype = CONTENT_TYPES.get(ext, "application/octet-stream")
+    disposition = "inline" if ext in INLINE_EXTENSIONS else "attachment"
 
     if OUTPUT_DIR.resolve() in file_path.parents and file_path.exists():
         # Fast path: still on local disk (recent batch, same instance
         # that generated it).
-        response = send_file(file_path, mimetype=mimetype, as_attachment=True, download_name=safe_name)
+        response = send_file(file_path, mimetype=mimetype, as_attachment=(disposition == "attachment"), download_name=safe_name)
     else:
         # Local copy is gone — either Render redeployed/restarted since
         # (wiping its ephemeral disk) or our own hourly cleanup ran.
@@ -201,10 +223,12 @@ def download(batch_id, filename):
             return jsonify({"error": "File not found"}), 404
         response = Response(data, mimetype=mimetype)
 
-    # Always a normal named download, never inline — set explicitly
-    # (quoted) rather than trusting send_file's default formatting alone,
-    # so the header is deterministic regardless of Werkzeug version quirks.
-    response.headers["Content-Disposition"] = f'attachment; filename="{safe_name}"'
+    # Set this explicitly (quoted) rather than trusting send_file's default
+    # formatting alone, so the header is deterministic regardless of
+    # Werkzeug version quirks — this is the header a browser actually reads
+    # to recognize a completed download's real filename/extension, and
+    # inline vs. attachment decides whether it opens in-browser or downloads.
+    response.headers["Content-Disposition"] = f'{disposition}; filename="{safe_name}"'
     return response
 
 

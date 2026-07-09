@@ -36,6 +36,7 @@ def process_files(paths):
             "error": None,
             "provider_name": None,
             "date": None,
+            "email_html": None,
         }
         try:
             content = read_file(path)
@@ -49,6 +50,15 @@ def process_files(paths):
             result["error"] = f"Unexpected error reading file: {e}"
             results.append(result)
             continue
+
+        # An .eml's own HTML body (already parsed by file_readers, not
+        # re-rendered) — lets app.py link Link to Brochure at that HTML
+        # directly instead of the raw .eml, so it opens in-browser with its
+        # original images (the markup already points at the sender's
+        # hosted image URLs) rather than downloading a mail file. Falls
+        # back to None for a plain-text-only email, or anything else.
+        if path.suffix.lower() == ".eml" and content.get("html"):
+            result["email_html"] = content["html"]
 
         rule_name, raw_records = try_rules(content)
         llm_source_name = None
