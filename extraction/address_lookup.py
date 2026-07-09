@@ -27,28 +27,37 @@ CACHE_PATH = Path(__file__).resolve().parent.parent / ".address_lookup_cache.jso
 _cache = None
 
 
-def find_address(building_name, context_hint="a commercial office building in London, UK"):
+def find_address(building_name, provider_name=None, context_hint="a commercial office building in London, UK"):
     """Best-effort: returns a plain address string found via a real web
     search, or None if unconfigured, the model couldn't confidently find
     a real address for this specific building, or any error occurred.
     Never raises — this is always an optional last-resort fallback, never
-    something that should fail the batch."""
+    something that should fail the batch.
+
+    provider_name (e.g. "GPE", "MetSpace", "Knotel", "Kitts", "BC") is the
+    source/broker this listing came from — included in the search so a
+    generic building name (e.g. "Elsley") isn't confused with an unrelated
+    building of the same name elsewhere. Confirmed empirically this
+    matters: a bare-name search for "Elsley" alone found a building in
+    Battersea (SW11 5LL), when the real GPE-managed "Elsley" is in
+    Fitzrovia (W1W 8BF) — adding "GPE Fully Managed" to the search fixed it.
+    """
     building_name = (building_name or "").strip()
     if not building_name:
         return None
 
     cache = _load_cache()
-    key = building_name.lower()
+    key = f"{building_name.lower()}|{(provider_name or '').strip().lower()}"
     if key in cache:
         return cache[key]
 
-    address = _search(building_name, context_hint)
+    address = _search(building_name, provider_name, context_hint)
     cache[key] = address
     _save_cache(cache)
     return address
 
 
-def _search(building_name, context_hint):
+def _search(building_name, provider_name, context_hint):
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
@@ -59,9 +68,15 @@ def _search(building_name, context_hint):
     except ImportError:
         return None
 
+    subject = f'a building called "{building_name}"'
+    if provider_name:
+        subject += f', operated by or listed under "{provider_name}"'
+
     prompt = (
-        f'Search the web to find the real, current full street address (including '
-        f'postcode) of a specific building called "{building_name}", which is {context_hint}. '
+        f"Search the web to find the real, current full street address (including "
+        f"postcode) of {subject}, which is {context_hint}. Base your answer only on "
+        f"actual web search results — if search results don't confirm a specific "
+        f"address for this specific building, don't guess from prior knowledge alone.\n\n"
         f"Return ONLY the address as plain text on a single line "
         f'(e.g. "12 Example Street, London EC1A 1BB") — no commentary, no markdown, no quotes. '
         f"If a web search does not confidently identify a real address for this specific "

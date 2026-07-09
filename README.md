@@ -149,29 +149,37 @@ compatibility (matching the "Loader" sheet of
   works through several fallback tiers, in order, each logged distinctly
   (`[geocode] ...`) so which tier produced a result is always traceable:
   1. A spelled-out leading building number converted to digits (e.g.
-     "Thirty One Alfred Place" → "31 Alfred Place").
-  2. Nominatim again with nothing but the bare building name + "London,
-     UK", dropping any postcode/extra detail that may have made a fuller
-     query fail.
-  3. An actual web search for the building's real address — Gemini with
-     Google Search grounding (`extraction/address_lookup.py`), not
-     another Nominatim query — since Nominatim can only match an address
-     it's given; retrying it with variations of a name it already failed
-     on can't discover an address it was never told. Confirmed against a
-     real gap (BC's "Porters Place", which has no Area/street context in
-     the source at all): no Nominatim phrasing found it, but a real web
-     search did.
+     "Thirty One Alfred Place" → "31 Alfred Place") — counts as a
+     confident match (a full street address, just spelled out in words),
+     not the bare-name case below.
+  2. For a genuinely bare building name (no house number/street at all,
+     spelled out or otherwise) — an actual web search for the building's
+     real address, Gemini with Google Search grounding
+     (`extraction/address_lookup.py`), with the source/provider name
+     (e.g. "GPE", "MetSpace") included as disambiguating context (e.g.
+     "Elsley GPE Fully Managed" instead of just "Elsley"). Not another
+     Nominatim query — Nominatim can only match an address it's given,
+     and this is tried *before* a bare Nominatim search specifically
+     because a bare name alone isn't trustworthy (see below).
+  3. Only if that finds nothing: Nominatim on just the bare building name
+     + "London, UK", as a last resort — same risk as tier 2's justification.
 
   A bare building name (no house number/street) is inherently a weaker
   signal than a full address — not guaranteed unique, and confirmed
-  empirically that searching just a bare name with no city qualifier at
-  all can match a same-named place on the other side of the world. So a
-  match from fallback tier 2 gets `" (unverified)"` appended to `Lat`/
-  `Lng` (and `Property Postcode`, if that was also backfilled from the
-  same lookup) — visible in the spreadsheet itself, not just the console
-  log. If every tier still finds nothing, the cell shows literal text
-  `"Needs manual lookup"` instead of being left blank. None of this ever
-  blocks the rest of the batch.
+  empirically *twice*: BC's "Porters Place" alone (no city qualifier) once
+  matched a street in Barbados, and GPE's "Elsley" alone matched a
+  building in Battersea (SW11 5LL) when the real GPE-managed "Elsley" is
+  in Fitzrovia (W1W 8BF) — adding "GPE Fully Managed" as search context
+  fixed it. So a value from tier 2 or 3 gets `" (Not in source text)"`
+  appended to `Lat`/`Lng` (and `Property Postcode`, if that was also
+  backfilled from the same lookup) — visible in the spreadsheet itself,
+  not just the console log. The label describes *why* it's flagged (the
+  source document never stated this address at all, so it had to be
+  derived some other way), not a claim that the value is wrong — most
+  derived values are correct, they just couldn't be read directly from
+  the source. If every tier still finds nothing, the cell shows literal
+  text `"Needs manual lookup"` instead of being left blank. None of this
+  ever blocks the rest of the batch.
 
   Note: as of testing this (2026-07), Google Search grounding returned
   429 RESOURCE_EXHAUSTED on this project's free tier for

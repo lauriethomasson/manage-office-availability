@@ -87,9 +87,12 @@ def process_files(paths):
             results.append(result)
             continue
 
-        _geocode_records(normalized, filename)
-
+        # Resolved before geocoding (rather than after, as before) so the
+        # web-search fallback can pass it along as disambiguating context
+        # (e.g. "Elsley GPE Fully Managed" instead of just "Elsley").
         provider_name = resolve_provider_name(rule_name, filename, llm_source_name)
+        _geocode_records(normalized, filename, provider_name)
+
         # Prefer the source document's own date (email Date header, or PDF/
         # DOCX metadata) over processing time, so External Ref reflects when
         # the listing was actually sent/dated, not when someone happened to
@@ -108,7 +111,7 @@ def process_files(paths):
     return results
 
 
-def _geocode_records(records, filename):
+def _geocode_records(records, filename, provider_name):
     """Fills Lat/Lng in place for each record via extraction.geocode.
     geocode() caches on disk by address string, so repeat buildings (e.g.
     several floors in the same Knotel building) cost one lookup, not one
@@ -120,71 +123,48 @@ def _geocode_records(records, filename):
     Place" has no postcode at all) — only as a fallback; a postcode already
     parsed from the source text is never overwritten.
 
-    Lat/Lng/Property Postcode are required fields, so as a last resort —
-    when nothing else matched — this retries with nothing but the bare
-    building name (+ "London, UK"), dropping any postcode/extra detail
-    that may have made the fuller query fail. That bare-name query is
-    inherently lower confidence: a name with no house number/street
-    (e.g. "Porters Place") isn't guaranteed unique, and confirmed
-    empirically that dropping the city/country context entirely can match
-    a same-named place on the other side of the world (bare "Porters
-    Place" resolves to a street in Barbados). Every match or failure that
-    came from this bare-name tier is flagged in the printed log line, and
-    it's never used to silently overwrite Property Address 1/Building.
-
-    If even that fails, this does an actual web search for the building's
-    real address (extraction.address_lookup, Gemini + Google Search
-    grounding) and geocodes that — a genuinely different fallback, not
-    another Nominatim query, since Nominatim can only match an address
-    it's given.
+    Lat/Lng/Property Postcode are required fields. When the source gives
+    nothing but a bare building name (no street/house number at all — not
+    even one spelled out in words) there's a real risk of geocoding it to
+    the wrong place entirely: a bare-name Nominatim search for "Porters
+    Place" alone matched a street in Barbados, and "Elsley" alone matched a
+    building in Battersea (SW11) when the real GPE-managed "Elsley" is in
+    Fitzrovia (W1W) — and critically, Nominatim returned a match either
+    way, so this can't be caught by "retry only if the direct lookup found
+    nothing." For a genuinely bare name, this never trusts a direct/bare
+    Nominatim match as the primary result at all — it tries an actual web
+    search FIRST, Gemini + Google Search grounding
+    (extraction.address_lookup), with the source/provider name included as
+    disambiguating context (e.g. "Elsley GPE Fully Managed" instead of
+    just "Elsley"). Only if that finds nothing does this fall back to a
+    plain bare-name Nominatim search, still exposed to the same risk.
+    Either way, the result is marked "(Not in source text)" in the output,
+    since it reflects a real gap in the source document, not a
+    wrong-vs-right judgment on the value itself — it's never used to
+    silently overwrite Property Address 1/Building.
     """
     for record in records:
-        query = _geocode_query(record)
-        lat, lng, geo_postcode, error = geocode(query)
-
-        # Nominatim can't match a building number spelled out in words
-        # (e.g. "Thirty One Alfred Place" for "31 Alfred Place") — if the
-        # direct lookup found nothing, retry once with that leading number
-        # word converted to digits before giving up.
-        if lat is None:
-            digit_address = spelled_number_to_digits(record.get("Property Address 1") or "")
-            if digit_address:
-                retry_query = _geocode_query({**record, "Property Address 1": digit_address})
-                retry_lat, retry_lng, retry_postcode, retry_error = geocode(retry_query)
-                if retry_lat is not None:
-                    query, lat, lng, geo_postcode, error = retry_query, retry_lat, retry_lng, retry_postcode, retry_error
-
         building = (record.get("Property Address 1") or "").strip()
-        bare_query = _geocode_query({"Property Address 1": building}) if building else ""
-        # No house number/street in the source at all — a bare building
-        # name is inherently a weaker signal than a full street address,
-        # regardless of whether this attempt succeeds or fails.
-        low_confidence = bool(building) and not any(ch.isdigit() for ch in building)
+        has_digit = any(ch.isdigit() for ch in building)
+        # Nominatim can't match a building number spelled out in words
+        # (e.g. "Thirty One Alfred Place" for "31 Alfred Place") — this
+        # still counts as a confident full street address, just spelled
+        # out, not the bare-name case below.
+        digit_address = spelled_number_to_digits(building) if building and not has_digit else None
+        is_bare_name = bool(building) and not has_digit and not digit_address
 
-        if lat is None and bare_query and bare_query != query:
-            retry_lat, retry_lng, retry_postcode, retry_error = geocode(bare_query)
-            query = bare_query
-            if retry_lat is not None:
-                lat, lng, geo_postcode, error = retry_lat, retry_lng, retry_postcode, retry_error
-            else:
-                error = retry_error
+        query = _geocode_query(record)
+        derived_note = False
 
-        # Nominatim can only match an address it's given — retrying it
-        # with variations of the same building name can't discover
-        # information it never had. If nothing above found a match, do an
-        # actual web search (Gemini + Google Search grounding,
-        # extraction.address_lookup) for the building's real address, then
-        # geocode that. This is a genuinely different fallback, not another
-        # Nominatim query — confirmed empirically for "Porters Place" (a
-        # source with no Area/street context beyond the bare name): no
-        # Nominatim phrasing found it, but a real web search did.
-        from_web_search = False
-        if lat is None and building:
-            web_address = find_address_via_web_search(building)
+        if is_bare_name:
+            lat = lng = geo_postcode = None
+            error = None
+            web_address = find_address_via_web_search(building, provider_name)
             if web_address:
                 web_query = _geocode_query({"Property Address 1": web_address})
-                web_lat, web_lng, web_postcode, web_error = geocode(web_query)
-                if web_lat is not None:
+                lat, lng, geo_postcode, error = geocode(web_query)
+                if lat is not None:
+                    query = web_query
                     # Prefer the postcode actually present in the found
                     # address text over Nominatim's address-breakdown
                     # postcode — confirmed empirically that Nominatim can
@@ -193,11 +173,24 @@ def _geocode_records(records, filename):
                     # "11 St John Street" geocodes to a building spanning
                     # house numbers 11-33, whose OSM postcode, EC1M 4NX,
                     # doesn't match number 11's real postcode).
-                    web_postcode = extract_postcode(web_address) or web_postcode
-                    query, lat, lng, geo_postcode, error = web_query, web_lat, web_lng, web_postcode, web_error
-                    from_web_search = True
-                else:
-                    error = web_error
+                    geo_postcode = extract_postcode(web_address) or geo_postcode
+                    derived_note = True
+
+            if lat is None:
+                # Web search found nothing (or GEMINI_API_KEY isn't set) —
+                # last resort: Nominatim on just the bare name. Same risk
+                # as before (a coincidental match elsewhere), so still
+                # flagged if it does find something.
+                lat, lng, geo_postcode, error = geocode(query)
+                if lat is not None:
+                    derived_note = True
+        else:
+            lat, lng, geo_postcode, error = geocode(query)
+            if lat is None and digit_address:
+                retry_query = _geocode_query({**record, "Property Address 1": digit_address})
+                retry_lat, retry_lng, retry_postcode, retry_error = geocode(retry_query)
+                if retry_lat is not None:
+                    query, lat, lng, geo_postcode, error = retry_query, retry_lat, retry_lng, retry_postcode, retry_error
 
         postcode_from_geocode = False
         if not record.get("Property Postcode") and geo_postcode:
@@ -205,35 +198,22 @@ def _geocode_records(records, filename):
             postcode_from_geocode = True
 
         if lat is not None:
-            if from_web_search:
-                # A real street address was found via an actual web search
-                # for this specific building (not a coincidental Nominatim
-                # name match), then geocoded normally — treated as a
-                # confident result, distinctly logged so it's still
-                # traceable to this fallback tier.
-                record["Lat"] = lat
-                record["Lng"] = lng
-                _safe_print(
-                    f"[geocode] FOUND VIA WEB SEARCH {filename}: '{building}' had no address in the "
-                    f"source and no direct geocode match — found '{query}' via Gemini + Google Search "
-                    f"grounding. lat={lat}, lng={lng}."
-                )
-            elif low_confidence:
-                # A real match, but from the bare-name tier — still usable,
-                # but visibly marked in the spreadsheet itself (not just the
-                # console log) so it's distinguishable from a confident
-                # match without cross-checking anything. Property Postcode
-                # only gets the same marker when it came from this same
-                # low-confidence lookup — a postcode already present in the
-                # source text is left alone, since it isn't in question.
-                record["Lat"] = f"{lat} (unverified)"
-                record["Lng"] = f"{lng} (unverified)"
+            if derived_note:
+                # The source gave nothing but a bare building name — this
+                # value was derived (web search or a bare-name geocode),
+                # not read directly from the source document. Flagged in
+                # the spreadsheet itself, not just the console log, so
+                # it's distinguishable at a glance. Property Postcode only
+                # gets the same marker when it came from this same lookup —
+                # a postcode already present in the source text is left
+                # alone, since it isn't in question.
+                record["Lat"] = f"{lat} (Not in source text)"
+                record["Lng"] = f"{lng} (Not in source text)"
                 if postcode_from_geocode:
-                    record["Property Postcode"] = f"{geo_postcode} (unverified)"
+                    record["Property Postcode"] = f"{geo_postcode} (Not in source text)"
                 _safe_print(
-                    f"[geocode] LOW-CONFIDENCE MATCH {filename}: '{query}' — building name only, "
-                    f"no street/postcode in the source. lat={lat}, lng={lng}. Risk of matching the "
-                    f"wrong location if this name isn't unique — verify before relying on it."
+                    f"[geocode] (Not in source text) {filename}: '{building}' -> '{query}': "
+                    f"lat={lat}, lng={lng}. No street/postcode in the source — verify before relying on it."
                 )
             else:
                 record["Lat"] = lat
@@ -247,7 +227,7 @@ def _geocode_records(records, filename):
             record["Lng"] = "Needs manual lookup"
             if not record.get("Property Postcode"):
                 record["Property Postcode"] = "Needs manual lookup"
-            prefix = "[geocode] (low-confidence, building-name-only) " if low_confidence else "[geocode] "
+            prefix = "[geocode] (bare building name, no match found) " if is_bare_name else "[geocode] "
             target = query or building or "(blank)"
             _safe_print(f"{prefix}{filename}: could not geocode '{target}': {error}")
 
