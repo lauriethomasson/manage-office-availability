@@ -51,22 +51,36 @@ def find_address(building_name, provider_name=None, context_hint="a commercial o
     if key in cache:
         return cache[key]
 
-    address = _search(building_name, provider_name, context_hint)
-    cache[key] = address
-    _save_cache(cache)
+    address, cacheable = _search(building_name, provider_name, context_hint)
+    # Only cache a genuine "no address found" answer from the model —
+    # never a transient failure (e.g. a 429 quota error, a network hiccup,
+    # no API key configured). Caching those would permanently poison this
+    # building/provider pair: it'd keep returning None on every future run
+    # even after the quota resets or a key gets added, since the cache is
+    # checked before ever calling the API again. Confirmed this was
+    # actually happening — a quota error while re-testing GPE got cached
+    # as null for Elsley/Kent House/City Tower/Elm Yard, silently blocking
+    # retries.
+    if cacheable:
+        cache[key] = address
+        _save_cache(cache)
     return address
 
 
 def _search(building_name, provider_name, context_hint):
+    """Returns (address_or_none, cacheable) — cacheable is False whenever
+    the reason for a None result is transient (should be retried on a
+    future run), True when the model gave a confident "no such address"
+    answer worth remembering."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return None
+        return None, False
 
     try:
         from google import genai
         from google.genai import types
     except ImportError:
-        return None
+        return None, False
 
     subject = f'a building called "{building_name}"'
     if provider_name:
@@ -95,15 +109,18 @@ def _search(building_name, provider_name, context_hint):
             config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())]),
         )
     except Exception as e:
+        # A quota error (429), a network failure, etc. — not a real
+        # answer, so not cacheable; the caller should be free to retry
+        # this exact building/provider pair again next time.
         print(f"[address_lookup] web search failed for '{building_name}': {type(e).__name__}: {e}")
-        return None
+        return None, False
 
     text = (response.text or "").strip()
     if not text or text.upper().startswith(NOT_FOUND):
-        return None
+        return None, True
     # Guard against the model adding anything beyond the single line asked
     # for despite instructions.
-    return text.splitlines()[0].strip().strip('"')
+    return text.splitlines()[0].strip().strip('"'), True
 
 
 def _load_cache():
