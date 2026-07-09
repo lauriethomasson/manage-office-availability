@@ -17,6 +17,13 @@ LINK_COLS = {"Link to Brochure", "Floor Plan", "High Res Images"}
 # Free-text columns that can run long enough to overflow into neighboring
 # cells — wrapped within their own cell instead, with row height grown to fit.
 WRAP_COLS = {"Special Features", "Contacts", "Assigned Agents"}
+# Row height is shared across the whole row (an Excel/xlsx constraint, not
+# something we control) — when a wrapped cell grows a row, every other cell
+# in that row grows with it. Default vertical alignment is bottom, which
+# makes short-content cells (e.g. Property Postcode, Size (sq ft)) sit in
+# empty space at the bottom of a tall row instead of lining up with the top
+# of the wrapped text — so every data cell gets top alignment as a baseline.
+TOP_ALIGNMENT = Alignment(vertical="top")
 WRAP_ALIGNMENT = Alignment(wrap_text=True, vertical="top")
 LINE_HEIGHT = 15  # approx. points needed per wrapped line at 11pt Calibri
 
@@ -44,6 +51,7 @@ def write_xlsx(path, records, sheet_title="Listings"):
         for row_idx in range(2, last_row + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
             val = cell.value
+            cell.alignment = TOP_ALIGNMENT
             if col_name in CURRENCY_COLS and isinstance(val, (int, float)) and val != "":
                 cell.number_format = "£#,##0.00" if col_name.endswith("PSF") else "£#,##0"
             elif col_name in NUMBER_COLS and isinstance(val, (int, float)) and val != "":
