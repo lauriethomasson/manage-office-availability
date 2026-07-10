@@ -29,6 +29,7 @@ DESKS_LINE_RE = re.compile(r"\bdesks?\b", re.IGNORECASE)
 SQFT_LINE_RE = re.compile(r"^[\d,]+(\s*-\s*[\d,]+)?$")
 PSF_LINE_RE = re.compile(r"^£[\d,.]+(\s*-\s*£?[\d,.]+)?$")
 MARKER = ("Available", "Desk space", "Sq ft", "Price (psf)")
+NAME_RE = re.compile(r"^[A-Z][a-zA-Z'.-]+(?: [A-Z][a-zA-Z'.-]+)+$")
 
 
 def detect(content):
@@ -47,6 +48,7 @@ def parse(content):
         lines = lines[lines.index("CURRENT AVAILABILITY") + 1 :]
     except ValueError:
         pass
+    contact = _contact_block(lines)
     records = []
     current_area = ""
     buffer = []
@@ -84,6 +86,7 @@ def parse(content):
                             "Desks (max)": _max_desks(desks_line),
                             "Marketing Price (Based on Min Term) PSF": psf_line.split("-")[-1].replace("£", "").strip(),
                             "Special Features": features,
+                            "Contacts": contact,
                         }
                     )
                     found_any = True
@@ -124,3 +127,25 @@ def _max_desks(desc):
         return m.group(2)
     m2 = re.search(r"\d+", desc)
     return m2.group() if m2 else ""
+
+
+def _contact_block(lines):
+    """GPE emails end with a fixed, whole-email "Get in touch" block, not
+    per-listing info — same idea as MetSpace's own contact block. Shaped
+    as repeating Name / phone-number-line(s) groups (a phone number is
+    sometimes hard-wrapped across two lines, e.g. "+44 (0) 7435 9" then
+    "39 956" — a source formatting quirk), terminated by "View in
+    browser". Rather than parse the phone number's own shape (fragile
+    given that wrapping), just keep whichever lines look like a person's
+    name and skip everything else in the block."""
+    try:
+        idx = lines.index("Get in touch")
+    except ValueError:
+        return ""
+    end = next((i for i in range(idx + 1, len(lines)) if lines[i] == "View in browser"), len(lines))
+    names = [l for l in lines[idx + 1 : end] if NAME_RE.match(l)]
+    seen = []
+    for n in names:
+        if n not in seen:
+            seen.append(n)
+    return ", ".join(seen)
