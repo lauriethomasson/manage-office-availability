@@ -35,6 +35,19 @@ MIN_INDEPENDENT_SOURCES = 2
 CACHE_PATH = Path(__file__).resolve().parent.parent / ".address_lookup_cache.json"
 _cache = None
 
+# Confirmed (2026-07) that grounding_metadata.grounding_chunks can come back
+# completely empty on one call and populated on the next, for the exact same
+# building/provider query — see the flakiness note in _search below. That
+# case is retried on a future run rather than cached as a permanent
+# rejection, but retrying forever on a building that's *consistently* flaky
+# would quietly burn through the 20/day free-tier quota one call at a time,
+# every time it's reprocessed. This caps it: after this many empty-metadata
+# misses (across separate runs, not retried within a single run), give up
+# and cache a final rejection like any other confident "not found" — same
+# worst-case cost as the old behavior, just delayed enough to give a normal
+# flaky miss a couple of chances to resolve itself first.
+MAX_EMPTY_METADATA_MISSES = 3
+
 
 def find_address(building_name, provider_name=None, context_hint="a commercial office building in London, UK"):
     """Best-effort: returns (address_or_none, sources) — address is a
@@ -61,46 +74,75 @@ def find_address(building_name, provider_name=None, context_hint="a commercial o
 
     cache = _load_cache()
     key = f"{building_name.lower()}|{(provider_name or '').strip().lower()}"
+    pending_misses = 0
     if key in cache:
         entry = cache[key]
-        # Tolerate the older cache format (a bare string or null, from
-        # before `sources` was tracked) rather than crashing on it.
         if isinstance(entry, dict):
-            return entry.get("address"), entry.get("sources") or []
-        return entry, []
+            status = entry.get("status")
+            if status == "flaky":
+                # A prior run got an answer with no grounding chunks at all
+                # (API flakiness, not a real rejection — see _search) and
+                # hadn't yet hit MAX_EMPTY_METADATA_MISSES. Retry now
+                # rather than trusting that non-final result forever.
+                pending_misses = entry.get("misses", 0)
+            elif status == "final" or entry.get("address") is not None:
+                return entry.get("address"), entry.get("sources") or []
+            else:
+                # A pre-fix cache entry: {"address": None, "sources": []}
+                # with no "status" at all. The old code cached this
+                # shape for BOTH a genuine rejection and the flaky
+                # empty-metadata false negative identically — there's no
+                # way to tell which one produced any given entry already
+                # on disk. Treat it as an unfinished flaky attempt (retry,
+                # still bounded by MAX_EMPTY_METADATA_MISSES) rather than
+                # trusting a rejection that might just be stale API
+                # flakiness from before this fix existed.
+                pending_misses = entry.get("misses", 0)
+        else:
+            # Tolerate the oldest cache format (a bare string or null, from
+            # before `sources`/`status` were tracked) rather than crashing.
+            return entry, []
 
-    address, sources, cacheable = _search(building_name, provider_name, context_hint)
-    # Only cache a genuine, confident answer from the model (found, or a
-    # deliberate "not enough sources"/"no address" rejection) — never a
-    # transient failure (e.g. a 429 quota error, a network hiccup, no API
-    # key configured). Caching those would permanently poison this
-    # building/provider pair: it'd keep returning None on every future run
-    # even after the quota resets or a key gets added, since the cache is
-    # checked before ever calling the API again. Confirmed this was
-    # actually happening — a quota error while re-testing GPE got cached
-    # as null for Elsley/Kent House/City Tower/Elm Yard, silently blocking
-    # retries.
+    address, sources, cacheable, flaky = _search(building_name, provider_name, context_hint)
     if cacheable:
-        cache[key] = {"address": address, "sources": sources}
+        # A genuine, confident answer from the model (found, or a
+        # deliberate "not enough sources"/"no address" rejection) — never a
+        # transient failure (e.g. a 429 quota error, a network hiccup, no
+        # API key configured). Caching those would permanently poison this
+        # building/provider pair: it'd keep returning None on every future
+        # run even after the quota resets or a key gets added, since the
+        # cache is checked before ever calling the API again. Confirmed
+        # this was actually happening — a quota error while re-testing GPE
+        # got cached as null for Elsley/Kent House/City Tower/Elm Yard,
+        # silently blocking retries.
+        cache[key] = {"address": address, "sources": sources, "status": "final"}
+        _save_cache(cache)
+    elif flaky:
+        misses = pending_misses + 1
+        if misses >= MAX_EMPTY_METADATA_MISSES:
+            print(f"[address_lookup] '{building_name}' hit {misses} empty-metadata misses — giving up for good")
+            cache[key] = {"address": None, "sources": [], "status": "final"}
+        else:
+            cache[key] = {"status": "flaky", "misses": misses}
         _save_cache(cache)
     return address, sources
 
 
 def _search(building_name, provider_name, context_hint):
-    """Returns (address_or_none, sources, cacheable) — cacheable is False
+    """Returns (address_or_none, sources, cacheable, flaky) — cacheable is False
     whenever the reason for a None result is transient (should be retried
     on a future run), True when the model gave a confident, final answer
     (an address backed by enough sources, or a deliberate rejection)
     worth remembering."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return None, [], False
+        return None, [], False, False
 
     try:
         from google import genai
         from google.genai import types
     except ImportError:
-        return None, [], False
+        return None, [], False, False
 
     subject = f'a building called "{building_name}"'
     if provider_name:
@@ -133,19 +175,41 @@ def _search(building_name, provider_name, context_hint):
         # answer, so not cacheable; the caller should be free to retry
         # this exact building/provider pair again next time.
         print(f"[address_lookup] web search failed for '{building_name}': {type(e).__name__}: {e}")
-        return None, [], False
+        return None, [], False, False
 
     text = (response.text or "").strip()
     if not text or text.upper().startswith(NOT_FOUND):
-        return None, [], True
+        return None, [], True, False
 
     # Guard against the model adding anything beyond the single line asked
     # for despite instructions.
     address = text.splitlines()[0].strip().strip('"')
-    sources = _extract_sources(response)
+    sources, grounded = _extract_sources(response)
 
     if len(sources) < MIN_INDEPENDENT_SOURCES:
-        # A single thin source is exactly the failure mode that produced
+        if not grounded:
+            # Confirmed empirically (2026-07): the same query, called
+            # again moments later, can come back with an identical
+            # confident address in response.text but with
+            # grounding_metadata.grounding_chunks entirely empty/None —
+            # even though an earlier call for the exact same building
+            # returned real, distinct cited chunks. This is API-side
+            # flakiness in whether grounding metadata is populated, not
+            # evidence the answer is actually unsupported. Treating it as
+            # a deliberate "not enough sources" rejection previously
+            # marked this cacheable — which permanently poisoned the
+            # cache for this building/provider pair (find_address()
+            # checks the cache before ever calling the API again), so one
+            # unlucky call blocked it forever, even past a quota reset.
+            # Not cacheable here: let a future run retry instead.
+            print(
+                f"[address_lookup] '{building_name}' -> '{address}' but grounding "
+                f"metadata had no chunks at all this call (likely API flakiness, not "
+                f"a real rejection) — not caching, will retry on a future run"
+            )
+            return None, [], False, True
+        # At least one real chunk came back, just fewer than required — a
+        # single thin source is exactly the failure mode that produced
         # three confirmed wrong addresses (Porters Place, Elsley, Kent
         # House) before this check existed — don't accept it just because
         # the model sounded confident. Still a real, cacheable outcome
@@ -155,26 +219,33 @@ def _search(building_name, provider_name, context_hint):
             f"[address_lookup] rejecting '{address}' for '{building_name}' — only "
             f"{len(sources)} independent source(s) cited (need >= {MIN_INDEPENDENT_SOURCES}): {sources}"
         )
-        return None, sources, True
+        return None, sources, True, False
 
-    return address, sources, True
+    return address, sources, True, False
 
 
 def _extract_sources(response):
-    """Best-effort list of distinct sources the grounding response
-    actually cited, for the minimum-sources check above and so a wrong
-    answer is traceable in the log/spreadsheet rather than an opaque
-    coordinate. Gemini's grounding chunks give a redirect URL through
-    Google's own domain, not the real source site, most of the time — so
-    this prefers the chunk's page title (which usually names the real
-    site) whenever the URL's own hostname isn't an independent domain."""
+    """Returns (sources, grounded). sources is the best-effort list of
+    distinct sources the grounding response actually cited, for the
+    minimum-sources check above and so a wrong answer is traceable in the
+    log/spreadsheet rather than an opaque coordinate. grounded is True
+    whenever the response carried at least one raw grounding chunk at
+    all — even if none of them resolved to a usable identity below — so
+    the caller can tell "grounding ran and cited real sources, just too
+    few of them" apart from "grounding metadata was empty this call"
+    (see the flakiness note in _search above); those need different
+    cacheability treatment. Gemini's grounding chunks give a redirect URL
+    through Google's own domain, not the real source site, most of the
+    time — so this prefers the chunk's page title (which usually names
+    the real site) whenever the URL's own hostname isn't an independent
+    domain."""
     try:
         metadata = response.candidates[0].grounding_metadata
         chunks = metadata.grounding_chunks if metadata else None
     except (AttributeError, IndexError):
-        return []
+        return [], False
     if not chunks:
-        return []
+        return [], False
 
     sources = []
     for chunk in chunks:
@@ -188,7 +259,10 @@ def _extract_sources(response):
         identity = host if is_real_domain else (title.strip() or uri)
         if identity and identity not in sources:
             sources.append(identity)
-    return sources
+    return sources, True
+
+
+STORAGE_KEY = "cache/address_lookup_cache.json"
 
 
 def _load_cache():
@@ -198,10 +272,27 @@ def _load_cache():
     if CACHE_PATH.exists():
         try:
             _cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+            return _cache
         except (json.JSONDecodeError, OSError):
-            _cache = {}
-    else:
-        _cache = {}
+            pass
+    # Local disk is gone (Render's free-tier disk is ephemeral and wiped on
+    # every cold start/redeploy — confirmed 2026-07 this was causing
+    # buildings to get needlessly re-queried against the 20/day free-tier
+    # grounding quota after every restart). Fall back to the same
+    # S3-compatible object storage already used for batch outputs
+    # (top-level storage.py, not a package under extraction/) — a no-op
+    # returning None if unconfigured, so local-only dev behaves exactly
+    # as before.
+    import storage
+
+    data = storage.fetch(STORAGE_KEY)
+    if data is not None:
+        try:
+            _cache = json.loads(data)
+            return _cache
+        except json.JSONDecodeError:
+            pass
+    _cache = {}
     return _cache
 
 
@@ -211,4 +302,8 @@ def _save_cache(cache):
     try:
         CACHE_PATH.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
-        pass
+        return  # nothing on local disk to mirror to storage below
+
+    import storage
+
+    storage.upload(STORAGE_KEY, CACHE_PATH)

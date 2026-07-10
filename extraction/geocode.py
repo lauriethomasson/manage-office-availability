@@ -95,6 +95,9 @@ def _cache_key(address):
     return " ".join(address.strip().lower().split())
 
 
+STORAGE_KEY = "cache/geocode_cache.json"
+
+
 def _load_cache():
     global _cache
     if _cache is not None:
@@ -102,10 +105,23 @@ def _load_cache():
     if CACHE_PATH.exists():
         try:
             _cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+            return _cache
         except (json.JSONDecodeError, OSError):
-            _cache = {}
-    else:
-        _cache = {}
+            pass
+    # Same ephemeral-disk risk as extraction.address_lookup's cache — Render's
+    # free-tier disk is wiped on cold start/redeploy, so fall back to the
+    # same S3-compatible object storage used for batch outputs (top-level
+    # storage.py) before giving up and starting from an empty cache.
+    import storage
+
+    data = storage.fetch(STORAGE_KEY)
+    if data is not None:
+        try:
+            _cache = json.loads(data)
+            return _cache
+        except json.JSONDecodeError:
+            pass
+    _cache = {}
     return _cache
 
 
@@ -115,4 +131,8 @@ def _save_cache(cache):
     try:
         CACHE_PATH.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
-        pass
+        return
+
+    import storage
+
+    storage.upload(STORAGE_KEY, CACHE_PATH)
