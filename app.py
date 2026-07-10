@@ -18,7 +18,6 @@ import storage
 from extraction import pdf_images
 from extraction.naming import make_unique_names
 from extraction.pipeline import process_files
-from extraction.sanity_checks import find_blank_field_warnings
 from spreadsheet import write_xlsx
 
 BASE_DIR = Path(__file__).parent
@@ -204,14 +203,6 @@ def process():
             if r["method"] == "llm" and source_path.suffix.lower() == ".pdf" and r.get("pages_text"):
                 upload_jobs.extend(_attach_pdf_images(r["records"], source_path, r["pages_text"], batch_dir, batch_id, name))
 
-            # Generic sanity check, run after every enrichment step above
-            # (Link to File, Floor Plan/High Res Images) so it reflects the
-            # spreadsheet's actual final state, not an intermediate one —
-            # checking any earlier would flag Link to File as blank on
-            # every single file, since it isn't set until just above. See
-            # extraction/sanity_checks.py for why this exists.
-            r["warnings"] = find_blank_field_warnings(r["records"], r["provider_name"] or name)
-
             write_xlsx(batch_dir / r["output_file"], r["records"], sheet_title=name)
 
             # Queued for the background thread below (storage.upload is a
@@ -236,7 +227,6 @@ def process():
                 "error": r["error"],
                 "output_file": r.get("output_file"),
                 "source_file": r.get("source_file"),
-                "warnings": r.get("warnings", []),
             }
             for r in results
         ]

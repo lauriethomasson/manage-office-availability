@@ -113,25 +113,13 @@ function renderResults(data) {
     const outputCell = f.output_file
       ? `<a class="download-link" href="${downloadUrl}">${escapeHtml(f.output_file)}</a>`
       : "—";
-    // A file can be "ok" and still carry warnings (extraction.sanity_checks —
-    // a field that came back blank for every row in this file, a likely
-    // missed extraction path rather than a genuine per-row gap) — shown
-    // alongside any hard error, styled distinctly so it doesn't read as a
-    // failure.
-    const notesParts = [];
-    if (f.error) notesParts.push(`<span class="error-text">${escapeHtml(f.error)}</span>`);
-    if (f.warnings && f.warnings.length) {
-      notesParts.push(
-        f.warnings.map((w) => `<div class="warning-text">${escapeHtml(w)}</div>`).join("")
-      );
-    }
     tr.innerHTML = `
       <td>${escapeHtml(f.filename)}</td>
       <td><span class="badge ${badgeClass}">${f.status}</span></td>
       <td class="method">${methodLabel}</td>
       <td>${f.record_count}</td>
       <td>${outputCell}</td>
-      <td>${notesParts.join("")}</td>`;
+      <td class="error-text">${f.error ? escapeHtml(f.error) : ""}</td>`;
     tbody.appendChild(tr);
   });
 
