@@ -56,5 +56,6 @@ button#processBtn:disabled { background: #2a2d36; color: #6b7280; cursor: not-al
 .method { color: #9aa0a6; font-size: 12px; }
 .summary-line { margin: 10px 0; font-size: 14px; }
 .error-text { color: #ff8a8a; font-size: 12px; }
+.warning-text { color: #f5c451; font-size: 12px; }
 .download-link { color: #8ab4ff; text-decoration: none; font-weight: 600; }
 .download-link:hover { text-decoration: underline; }
