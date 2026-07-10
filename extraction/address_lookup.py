@@ -297,13 +297,29 @@ def _load_cache():
 
 
 def _save_cache(cache):
+    """Local disk only — fast, synchronous, called after every single new
+    entry. Mirroring to S3 here too would add a real network round-trip on
+    every distinct building/address processed (confirmed empirically this
+    was slow enough, stacked on top of Nominatim's 1-req/sec throttle and
+    Gemini's multi-second grounding calls, to blow past gunicorn's default
+    30s worker timeout on a multi-building batch) — see flush_to_storage,
+    called once per batch instead, not once per record."""
     global _cache
     _cache = cache
     try:
         CACHE_PATH.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
-        return  # nothing on local disk to mirror to storage below
+        pass
 
+
+def flush_to_storage():
+    """Best-effort, one-shot mirror of the current on-disk cache to the
+    same S3-compatible storage used for batch outputs — call this once
+    after a whole batch finishes (extraction.pipeline.process_files),
+    not per-record. No-op if unconfigured or nothing has been cached yet
+    this process."""
+    if not CACHE_PATH.exists():
+        return
     import storage
 
     storage.upload(STORAGE_KEY, CACHE_PATH)

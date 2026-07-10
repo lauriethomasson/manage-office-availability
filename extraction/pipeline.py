@@ -7,6 +7,7 @@ separate (one output spreadsheet per source file, not one combined master).
 """
 from datetime import date
 
+from . import address_lookup, geocode as geocode_module
 from .address import extract_postcode, spelled_number_to_digits
 from .address_lookup import find_address as find_address_via_web_search
 from .file_readers import read_file
@@ -107,6 +108,14 @@ def process_files(paths):
         result["provider_name"] = provider_name
         result["date"] = extract_date(content)
         results.append(result)
+
+    # Mirror both on-disk lookup caches to durable storage once per batch,
+    # not once per record (see _save_cache in each module — doing it per
+    # record adds a real network round-trip on every distinct address,
+    # confirmed to risk exceeding gunicorn's default worker timeout on a
+    # multi-building batch).
+    address_lookup.flush_to_storage()
+    geocode_module.flush_to_storage()
 
     return results
 

@@ -126,13 +126,27 @@ def _load_cache():
 
 
 def _save_cache(cache):
+    """Local disk only — see extraction.address_lookup._save_cache for why
+    mirroring to S3 here too (once per record, called after every new
+    address geocoded) was confirmed to add enough latency to risk
+    exceeding gunicorn's default worker timeout on a multi-building batch.
+    flush_to_storage below does the mirror once per batch instead."""
     global _cache
     _cache = cache
     try:
         CACHE_PATH.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
-        return
+        pass
 
+
+def flush_to_storage():
+    """Best-effort, one-shot mirror of the current on-disk cache to the
+    same S3-compatible storage used for batch outputs — call this once
+    after a whole batch finishes (extraction.pipeline.process_files),
+    not per-record. No-op if unconfigured or nothing has been cached yet
+    this process."""
+    if not CACHE_PATH.exists():
+        return
     import storage
 
     storage.upload(STORAGE_KEY, CACHE_PATH)
