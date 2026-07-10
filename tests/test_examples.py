@@ -71,6 +71,55 @@ def check_metspace_floor_plans(failures):
         print(f"OK  {filename}: Floor Plan populated for {floor_plan_count}/{len(records)} rows, High Res Images correctly blank")
 
 
+def check_gpe_high_res_images(failures):
+    """Targeted regression test for a real bug that already shipped once:
+    GPE's rule never extracted High Res Images at all, despite the source
+    email genuinely containing a real per-building marketing photo
+    (confirmed by actually viewing several of them - real building
+    photos, unlike MetSpace's, which is why this checks High Res Images
+    specifically and not Floor Plan). Pins the exact, known-correct counts
+    for this specific example file rather than a vague ">0" check, so a
+    future regression fails loudly here instead of only being caught by
+    manually spot-checking a spreadsheet later."""
+    filename = "Fw_ The latest GPE Fully Managed availability – workspaces you won't want to miss..eml"
+    path = ROOT / filename
+    if not path.exists():
+        failures.append(f"{filename}: example file not found (expected at {path})")
+        return
+
+    content = read_file(path)
+    rule_name, records = try_rules(content)
+    if rule_name != "GPE" or not records:
+        failures.append(f"{filename}: expected rule 'GPE' with records, got '{rule_name}'")
+        return
+
+    high_res_count = sum(1 for r in records if (r.get("High Res Images") or "").strip())
+    floor_plan_count = sum(1 for r in records if (r.get("Floor Plan") or "").strip())
+
+    # Known-correct for this exact example file: 11 of 15 rows have a
+    # real High Res Images photo — every building except "16 Dufour's
+    # Place" (4 of the 15 rows), which genuinely has no image preceding
+    # its link in the source HTML at all (confirmed directly, not
+    # assumed). GPE's building-name link appears once per building, not
+    # once per floor, so all floors of the same building share one URL.
+    if high_res_count < 11:
+        failures.append(
+            f"{filename}: expected >= 11 records with a real High Res Images URL, got {high_res_count}/{len(records)} "
+            "— GPE's building-photo extraction may be broken again"
+        )
+    # Floor Plan should stay blank for GPE: no separate floor-plan-labeled
+    # image or link exists anywhere in this source - populating it would
+    # be fabricating a distinction the source doesn't actually have.
+    if floor_plan_count != 0:
+        failures.append(
+            f"{filename}: expected Floor Plan blank for all rows (no separate floor-plan resource exists in "
+            f"GPE's source), got {floor_plan_count}/{len(records)} populated"
+        )
+
+    if high_res_count >= 11 and floor_plan_count == 0:
+        print(f"OK  {filename}: High Res Images populated for {high_res_count}/{len(records)} rows, Floor Plan correctly blank")
+
+
 def main():
     failures = []
     for filename, expected_rule, min_count in EXPECTATIONS:
@@ -99,6 +148,7 @@ def main():
         print(f"OK  {filename}: {len(records)} records via {rule_name}")
 
     check_metspace_floor_plans(failures)
+    check_gpe_high_res_images(failures)
 
     if failures:
         print("\nFAILURES:")

@@ -102,7 +102,47 @@ def parse(content):
         buffer.append(lines[i])
         i += 1
 
+    photo_by_building = _photo_by_building(content.get("html_items", []))
+    for record in records:
+        photo = photo_by_building.get(record.get("Building"))
+        if photo:
+            record["High Res Images"] = photo
+
     return records
+
+
+def _photo_by_building(html_items):
+    """Maps each building name to its real marketing photo — a genuine
+    hosted assets-gbr.mkt.dynamics.com image (GPE's own images have no
+    distinguishing alt text, same situation as MetSpace, so this filters
+    by source domain instead), keyed by building rather than by
+    occurrence: confirmed empirically GPE's email links each building's
+    name exactly once (in the "CURRENT AVAILABILITY" section), not once
+    per floor/unit row the way MetSpace's does — so every floor of the
+    same building shares its one photo, applied by name lookup below
+    rather than by sequential position.
+
+    Actually viewed several of these images before wiring anything up:
+    unlike MetSpace's, every one is a real building photo, not a floor
+    plan diagram — no separate floor-plan-labeled image exists anywhere
+    in this source, so Floor Plan is deliberately left untouched here.
+
+    A stray image can precede an unrelated link (a promo "Find out more"/
+    "Read the full story" button, or an empty-text footer/social icon) —
+    harmless here since no record's Building will ever equal that link's
+    text, so the lookup below simply never matches it."""
+    photo_by_building = {}
+    pending_image = None
+    for kind, a, b in html_items:
+        if kind == "image":
+            if "digitalassets/images" in b:
+                pending_image = b
+            continue
+        text = a
+        if pending_image and text:
+            photo_by_building[text] = pending_image
+        pending_image = None
+    return photo_by_building
 
 
 def _clean_lines(text):
