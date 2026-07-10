@@ -39,7 +39,7 @@ def detect(content):
 
 def parse(content):
     lines = [l.strip() for l in content["text"].split("\n") if l.strip()]
-    link_groups = _group_links(content.get("links", []))
+    link_groups = _group_items(content.get("html_items", []))
 
     records = []
     current_area = ""
@@ -89,6 +89,7 @@ def parse(content):
                     "Marketing Price (Based on Min Term) PSF": _strip_units(price_psf, "per sqft"),
                     "Link to File": group.get("brochure", ""),
                     "Floor Plan": group.get("floorplan", ""),
+                    "High Res Images": group.get("highres", ""),
                 }
             )
         i += 1
@@ -112,18 +113,38 @@ def _strip_units(value, *units):
     return v.replace("£", "").strip()
 
 
-def _group_links(links):
-    """Chunk the (text, href) list into one dict per listing, keyed by
-    which button labels were found. A new group starts at "View property"
-    (the black primary button), which every listing has first."""
+def _group_items(items):
+    """Chunk the ordered (kind, text_or_alt, href_or_src) stream — from
+    extraction.file_readers' html_items — into one dict per listing, keyed
+    by which button labels (and photo, see below) were found. A new group
+    starts at "View property" (the black primary button), which every
+    listing has first.
+
+    Confirmed empirically (2026-07) that each listing's own card is laid
+    out in this literal DOM order: an <img alt="... featured image">
+    (a real, listing-specific photo — not a logo/icon), then floor/address
+    text, then this same button row. So the most recently seen "featured
+    image" src, at the moment a new group starts, belongs to that group —
+    reset immediately after so it can't leak into a later listing that
+    has no photo of its own."""
     groups = []
     current = None
-    for text, href in links:
+    pending_image = None
+    for kind, a, b in items:
+        if kind == "image":
+            if "featured image" in a.lower():
+                pending_image = b
+            continue
+
+        text, href = a, b
         if text not in LINK_LABELS:
             continue
         if text == "View property":
             current = {}
             groups.append(current)
+            if pending_image:
+                current["highres"] = pending_image
+                pending_image = None
         if current is None:
             current = {}
             groups.append(current)

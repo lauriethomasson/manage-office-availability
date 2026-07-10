@@ -65,7 +65,7 @@ def _clean_pdf_cell(cell):
 
 
 def _empty(**overrides):
-    base = {"text": "", "html": "", "links": [], "tables": [], "file_date": None, "pages_text": []}
+    base = {"text": "", "html": "", "links": [], "html_items": [], "tables": [], "file_date": None, "pages_text": []}
     base.update(overrides)
     return base
 
@@ -258,6 +258,29 @@ def _parse_html_string(html):
         for a in soup.find_all("a")
         if a.get("href")
     ]
+    # Interleaved (kind, text_or_alt, href_or_src) walk of <a>/<img> in true
+    # document order — lets a link-grouping rule (extraction.rules.knotel)
+    # correlate a listing's own photo (an <img>, not a link) to whichever
+    # group of buttons immediately follows it in the same card, something
+    # `links` above can't do since it only ever tracks anchors and drops
+    # images entirely. Confirmed empirically (Knotel) that a listing's own
+    # photo is a genuinely separate <img alt="... featured image"> — not a
+    # decorative logo/icon — appearing right before that listing's button
+    # row in the DOM, so a source's own layout convention decides "kind" via
+    # alt text here, not this function.
+    html_items = []
+    for el in soup.find_all(["a", "img"]):
+        if el.name == "a":
+            href = el.get("href", "")
+            if not href:
+                continue
+            link_text = re.sub(r"\s+", " ", el.get_text(" ", strip=True)).strip()
+            html_items.append(("link", link_text, href))
+        else:
+            src = el.get("src", "")
+            alt = el.get("alt", "")
+            if src and alt:
+                html_items.append(("image", alt, src))
     tables = []
     for t in soup.find_all("table"):
         rows = []
@@ -267,4 +290,4 @@ def _parse_html_string(html):
                 rows.append(cells)
         if rows:
             tables.append(rows)
-    return _empty(text=text, html=html, links=links, tables=tables)
+    return _empty(text=text, html=html, links=links, html_items=html_items, tables=tables)
