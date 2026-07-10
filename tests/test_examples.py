@@ -22,6 +22,55 @@ EXPECTATIONS = [
 ]
 
 
+def check_metspace_floor_plans(failures):
+    """Targeted regression test for a real bug that already shipped once:
+    MetSpace's rule never extracted Floor Plan/High Res Images at all,
+    despite the source email genuinely containing a per-listing floor
+    plan image (confirmed by actually viewing several of them - real
+    floor-plan diagrams, not building photos, which is why this checks
+    Floor Plan specifically and not High Res Images). Pins the exact,
+    known-correct counts for this specific example file rather than a
+    vague ">0" check, so a future regression (e.g. someone "fixing" the
+    html_items image filter and breaking this again) fails loudly here
+    instead of only being caught by manually spot-checking a spreadsheet
+    later."""
+    filename = "Fw_ MetSpace Availability Update.eml"
+    path = ROOT / filename
+    if not path.exists():
+        failures.append(f"{filename}: example file not found (expected at {path})")
+        return
+
+    content = read_file(path)
+    rule_name, records = try_rules(content)
+    if rule_name != "MetSpace" or not records:
+        failures.append(f"{filename}: expected rule 'MetSpace' with records, got '{rule_name}'")
+        return
+
+    floor_plan_count = sum(1 for r in records if (r.get("Floor Plan") or "").strip())
+    high_res_count = sum(1 for r in records if (r.get("High Res Images") or "").strip())
+
+    # Known-correct for this exact example file: 13 of 14 listings have a
+    # real floor plan image; the first listing genuinely has none (no
+    # image precedes its link in the source HTML at all) - not a bug.
+    if floor_plan_count < 13:
+        failures.append(
+            f"{filename}: expected >= 13 records with a real Floor Plan URL, got {floor_plan_count}/{len(records)} "
+            "— MetSpace's floor-plan-image extraction may be broken again"
+        )
+    # High Res Images should stay blank for MetSpace: the only embedded
+    # image per listing in this source is a floor plan, not a photo -
+    # populating this too would be fabricating a distinction the source
+    # doesn't actually have.
+    if high_res_count != 0:
+        failures.append(
+            f"{filename}: expected High Res Images blank for all rows (MetSpace's only per-listing image is a "
+            f"floor plan, not a photo), got {high_res_count}/{len(records)} populated"
+        )
+
+    if floor_plan_count >= 13 and high_res_count == 0:
+        print(f"OK  {filename}: Floor Plan populated for {floor_plan_count}/{len(records)} rows, High Res Images correctly blank")
+
+
 def main():
     failures = []
     for filename, expected_rule, min_count in EXPECTATIONS:
@@ -48,6 +97,8 @@ def main():
                 break
 
         print(f"OK  {filename}: {len(records)} records via {rule_name}")
+
+    check_metspace_floor_plans(failures)
 
     if failures:
         print("\nFAILURES:")

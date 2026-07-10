@@ -91,7 +91,49 @@ def parse(content):
         buffer.append(line)
         i += 1
 
+    _attach_floor_plans(records, content.get("html_items", []))
     return records
+
+
+def _attach_floor_plans(records, html_items):
+    """Fills Floor Plan from the source email's own per-listing image — a
+    real, hosted mcusercontent.com image (MetSpace's own images have no
+    distinguishing alt text, unlike Knotel's "X Floor featured image"
+    convention, so this filters by source domain and excludes the "Logo"-
+    alt company logo instead).
+
+    Confirmed by actually viewing several of these images that every one
+    is a floor plan diagram, not a building photo — despite looking, at
+    the HTML level, exactly like Knotel's own "featured image" pattern
+    (one image immediately preceding the listing's own link). Goes into
+    Floor Plan, not High Res Images, for that reason; High Res Images is
+    deliberately left blank for MetSpace since no second, genuinely-photo
+    image exists per listing in this source.
+
+    Confirmed empirically this is NOT a simple positional pairing either:
+    the first listing in a real example has no image at all, and a stray
+    trailing image precedes unrelated footer content (a broker's own
+    headshot near the signature block, not a floor plan) rather than
+    another listing. So this walks the real (image, link) stream in order
+    and only consumes an image for the next record still waiting for one
+    when the following link's text actually matches that record's own
+    Building — never assumed from position/count alone."""
+    idx = 0
+    pending_image = None
+    for kind, a, b in html_items:
+        if idx >= len(records):
+            break
+        if kind == "image":
+            if "mcusercontent.com" in b and a.strip().lower() != "logo":
+                pending_image = b
+            continue
+        text = a
+        building = records[idx].get("Building") or ""
+        if building and (text == building or text.startswith(building) or building in text):
+            if pending_image:
+                records[idx]["Floor Plan"] = pending_image
+            idx += 1
+        pending_image = None
 
 
 def _max_desks(desc):

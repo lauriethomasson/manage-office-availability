@@ -279,7 +279,16 @@ def _parse_html_string(html):
         else:
             src = el.get("src", "")
             alt = el.get("alt", "")
-            if src and alt:
+            # Confirmed empirically (MetSpace) that a source's own real,
+            # per-listing photos can legitimately have alt="" — requiring
+            # alt to be non-empty here (as originally written, tuned
+            # against Knotel's "X Floor featured image" convention) silently
+            # dropped every one of them before a rule ever saw them. Keep
+            # any image with a src at all; a specific rule (extraction.
+            # rules.knotel filters by alt text, extraction.rules.metspace
+            # by source domain) decides what's a real content photo vs.
+            # decorative — this layer shouldn't guess that generically.
+            if src:
                 html_items.append(("image", alt, src))
     tables = []
     for t in soup.find_all("table"):
