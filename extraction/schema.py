@@ -71,6 +71,16 @@ def normalize_record(record):
         v = record.get(c, "")
         out[c] = "" if v is None else v
 
+    # Underscore-prefixed keys are a rule's own staging fields for a later
+    # pipeline/app.py step (e.g. gpe.py's "_high_res_candidates", resolved
+    # into a real High Res Images URL/gallery by app.py's
+    # _finalize_high_res_images after normalization) — not part of the
+    # output schema itself, so they're not in SOURCE_FIELDS/blank_record,
+    # but need to survive this rebuild rather than being silently dropped.
+    for k, v in record.items():
+        if k.startswith("_"):
+            out[k] = v
+
     out["Size (sq ft)"] = _to_number(out["Size (sq ft)"])
     out["Desks (max)"] = _to_number(out["Desks (max)"])
     out["Marketing Price (Based on Min Term) PCM"] = _to_number(out["Marketing Price (Based on Min Term) PCM"])

@@ -22,6 +22,8 @@ here, only PSF — schema.normalize_record derives PCM from PSF * size / 12.
 """
 import re
 
+from bs4 import BeautifulSoup, NavigableString, Tag
+
 from extraction.text_utils import titlecase_area
 
 AREA_RE = re.compile(r"^[A-Z][A-Z '\"]+$")
@@ -102,60 +104,112 @@ def parse(content):
         buffer.append(lines[i])
         i += 1
 
-    photo_by_building = _photo_by_building(content.get("html_items", []))
+    building_names = {r.get("Building") for r in records if r.get("Building")}
+    photo_by_building = _photo_by_building(content, building_names)
     for record in records:
-        photo = photo_by_building.get(record.get("Building"))
-        if photo:
-            record["High Res Images"] = photo
+        candidates = photo_by_building.get(record.get("Building"))
+        if candidates:
+            record["_high_res_candidates"] = candidates
 
     return records
 
 
-def _photo_by_building(html_items):
-    """Maps each building name to its real marketing photo — a genuine
-    hosted assets-gbr.mkt.dynamics.com image (GPE's own images have no
+def _photo_by_building(content, building_names):
+    """Maps each building name to its real marketing photo(s) — genuine
+    hosted assets-gbr.mkt.dynamics.com images (GPE's own images have no
     distinguishing alt text, same situation as MetSpace, so this filters
     by source domain instead), keyed by building rather than by
     occurrence: confirmed empirically GPE's email links each building's
-    name exactly once (in the "CURRENT AVAILABILITY" section), not once
+    name exactly once in the "CURRENT AVAILABILITY" section, not once
     per floor/unit row the way MetSpace's does — so every floor of the
-    same building shares its one photo, applied by name lookup below
-    rather than by sequential position.
+    same building shares the same candidate photo(s), applied by name
+    lookup below rather than by sequential position.
 
-    Confirmed by re-reading the raw HTML after an initial implementation
-    got this backwards: each building's photo comes immediately AFTER
-    that building's own link, not before it (a strict, alternating
-    LINK-then-IMAGE-then-LINK-then-IMAGE... run through all 9 buildings
-    in the "CURRENT AVAILABILITY" section, one real photo each, none
-    missing). The first version of this function tracked "the last image
-    seen, attribute it to the next link" — which silently attributed
-    every building's real photo to the *following* building instead, and
-    dropped the very first ("16 Dufour's Place", nothing precedes it)
-    and the very last building's photo entirely (followed by "Enquire
-    now", not another building link). Confirmed by actually viewing
-    several: every one is a real building photo, not a floor plan
-    diagram — no separate floor-plan-labeled image exists anywhere in
-    this source, so Floor Plan is deliberately left untouched here.
+    A building can genuinely have TWO distinct real photos, not one:
+    confirmed by actually viewing them (not assumed) that a building
+    also featured in the promotional/news blurbs at the top of the email
+    (before "CURRENT AVAILABILITY") has its own separate photo there,
+    different from its "CURRENT AVAILABILITY" listing-card photo — e.g.
+    Thirty One Alfred Place has a ground-floor lounge shot in its promo
+    blurb and a rooftop terrace shot in its listing card; Elsley has an
+    outdoor courtyard shot in its promo blurb and an interior lounge shot
+    in its listing card. Neither photo is tied to a *specific floor* of
+    the building (this source has no per-floor photos at all, unlike
+    MetSpace/Knotel) — they're both building-level, just from two
+    different parts of the same email, so all floors of a building with
+    two photos share the same two-item candidate list; app.py turns 2+
+    candidates into a small gallery page (see _finalize_high_res_images).
 
-    A stray image can follow an unrelated link too (a promo "Find out
-    more"/"Visit website" button, or an empty-text footer/social icon) —
-    harmless here since no record's Building will ever equal that link's
-    text, so the lookup below simply never matches it. Only the first
-    image right after a link counts — further images before the next
-    link (e.g. several footer/social icons in a row) aren't attributed
-    to anything, since confirmed empirically each real listing has
-    exactly one photo, not several."""
+    The two sections use opposite DOM ordering, confirmed by direct
+    inspection: the "CURRENT AVAILABILITY" listing-card section is
+    LINK-then-IMAGE (a building's own name link, then its photo,
+    established after an earlier version of this function had the
+    direction backwards and silently shifted every building's photo
+    onto the next building's name); the promotional section is
+    TEXT-then-IMAGE-then-CTA (a building's name appears in a heading/
+    description, its photo follows, then a shared "Find out more"/"Read
+    the full story" button — with no per-building link to key off at
+    all, since 2-3 buildings can share one CTA). This finds the listing-
+    card photo via the established link-adjacency method, and separately
+    scans only the promo region (bounded to everything before the first
+    listing-card link, so it can't cross into and misread that section)
+    for each building's own nearby photo, searching a few positions in
+    either direction in a unified text+image sequence (BeautifulSoup's
+    own document-order traversal, so mid-word line-wrapping in the raw
+    HTML — e.g. "16\\n Dufour's Place" — can't break a plain substring
+    search the way it would against the raw HTML string directly)."""
+    html_items = content.get("html_items", [])
     photo_by_building = {}
+
+    # --- listing-card section: established link -> image adjacency ---
     pending_building = None
     for kind, a, b in html_items:
         if kind == "link":
             pending_building = a
             continue
-        # image
         if pending_building and "digitalassets/images" in b:
-            if pending_building not in photo_by_building:
-                photo_by_building[pending_building] = b
+            if pending_building in building_names and pending_building not in photo_by_building:
+                photo_by_building[pending_building] = [b]
             pending_building = None
+
+    # --- promotional section: bounded text-proximity scan ---
+    soup = BeautifulSoup(content.get("html", ""), "lxml")
+    sequence = []
+    for node in soup.descendants:
+        if isinstance(node, Tag) and node.name == "img":
+            src = node.get("src", "")
+            if "digitalassets/images" in src:
+                sequence.append(("image", src))
+        elif isinstance(node, Tag) and node.name == "a":
+            text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+            if text in building_names:
+                sequence.append(("boundary", text))
+                break  # the "CURRENT AVAILABILITY" section starts here
+        elif isinstance(node, NavigableString):
+            text = re.sub(r"\s+", " ", str(node)).strip()
+            if text:
+                sequence.append(("text", text))
+
+    window = 6  # sequence positions, either direction — generous enough
+    # for a promo photo to sit a few text nodes from its heading, tight
+    # enough not to reach into an unrelated building's own blurb.
+    for name in building_names:
+        positions = [i for i, (k, v) in enumerate(sequence) if k == "text" and name.lower() in v.lower()]
+        for pos in positions:
+            best_dist, best_src = None, None
+            for j in range(max(0, pos - window), min(len(sequence), pos + window + 1)):
+                if j == pos:
+                    continue
+                k, v = sequence[j]
+                if k == "image":
+                    dist = abs(j - pos)
+                    if best_dist is None or dist < best_dist:
+                        best_dist, best_src = dist, v
+            if best_src:
+                photo_by_building.setdefault(name, [])
+                if best_src not in photo_by_building[name]:
+                    photo_by_building[name].append(best_src)
+
     return photo_by_building
 
 

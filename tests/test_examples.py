@@ -73,17 +73,31 @@ def check_metspace_floor_plans(failures):
 
 def check_gpe_high_res_images(failures):
     """Targeted regression test for a real bug that already shipped
-    *twice*: first, GPE's rule never extracted High Res Images at all,
-    despite the source email genuinely containing a real per-building
-    marketing photo (confirmed by actually viewing several - real
-    building photos, unlike MetSpace's, which is why this checks High
-    Res Images specifically and not Floor Plan). Then the fix itself had
-    an off-by-one: it attributed each building's real photo to the
-    *next* building instead, which a naive ">= N populated" count
-    entirely failed to catch, since 11 of 15 rows were still "populated"
-    — just with the wrong photo. This checks actual per-building
-    correctness, not just a count: every distinct building must map to
-    its own distinct photo URL, with zero collisions between buildings."""
+    *twice*, plus a real assumption that turned out wrong a third time:
+    first, GPE's rule never extracted High Res Images at all, despite the
+    source email genuinely containing real per-building marketing photos
+    (confirmed by actually viewing several - real building photos, unlike
+    MetSpace's, which is why this checks High Res Images specifically and
+    not Floor Plan). Then the fix itself had an off-by-one: it attributed
+    each building's real photo to the *next* building instead, which a
+    naive ">= N populated" count entirely failed to catch, since 11 of 15
+    rows were still "populated" — just with the wrong photo. Then a third
+    bug: the fix assumed every building has exactly one photo shared
+    across all its floors, but visual confirmation against the actual
+    email showed some buildings (those also featured in the promotional
+    blurbs earlier in the email, not just their own "CURRENT AVAILABILITY"
+    listing card) genuinely have TWO distinct real photos, not one.
+
+    This rule now stashes candidate photo URLs on "_high_res_candidates"
+    (app.py turns 1 candidate into a direct High Res Images link, 2+ into
+    a small gallery page — see _finalize_high_res_images) rather than
+    setting High Res Images itself, so this checks the candidates
+    directly rather than routing through app.py's finalizer. It checks
+    actual per-building correctness, not just a count: every distinct
+    building must map to its own distinct candidate set (no collisions
+    between buildings), and the known-correct counts for this exact
+    example file — re-verified by actually viewing every photo in the
+    source email — must hold exactly."""
     filename = "Fw_ The latest GPE Fully Managed availability – workspaces you won't want to miss..eml"
     path = ROOT / filename
     if not path.exists():
@@ -106,52 +120,84 @@ def check_gpe_high_res_images(failures):
             f"GPE's source), got {floor_plan_count}/{len(records)} populated"
         )
 
-    # Known-correct for this exact example file: all 15 rows, across all
-    # 9 distinct buildings, have a real High Res Images photo - none
-    # missing (confirmed by re-reading the raw HTML: every one of the 9
-    # buildings in the "CURRENT AVAILABILITY" section is immediately
-    # followed by its own real photo, none skipped).
-    photo_by_building = {}
+    # Known-correct for this exact example file, re-verified by actually
+    # viewing every photo in the source email: 5 buildings have exactly 1
+    # real photo (their own "CURRENT AVAILABILITY" listing-card photo),
+    # 4 buildings (also featured in the promotional blurbs earlier in the
+    # email) have exactly 2 distinct real photos - 13 distinct images
+    # total, none missing, none duplicated across buildings.
+    EXPECTED_CANDIDATE_COUNT = {
+        "16 Dufour's Place": 1,
+        "City Tower": 1,
+        "166 Piccadilly": 1,
+        "Kent House": 1,
+        "Elm Yard": 1,
+        "170 Piccadilly": 2,
+        "Thirty One Alfred Place": 2,
+        "Nineteen Wells Street": 2,
+        "Elsley": 2,
+    }
+
+    candidates_by_building = {}
     mismatched = []
     missing = []
     for r in records:
         building = r.get("Building")
-        photo = (r.get("High Res Images") or "").strip()
-        if not photo:
+        candidates = r.get("_high_res_candidates") or []
+        if not candidates:
             missing.append(building)
             continue
-        if building in photo_by_building and photo_by_building[building] != photo:
+        if building in candidates_by_building and candidates_by_building[building] != tuple(candidates):
             mismatched.append(building)
-        photo_by_building[building] = photo
+        candidates_by_building[building] = tuple(candidates)
 
     if missing:
         failures.append(
-            f"{filename}: expected every row to have a real High Res Images photo, but these had none: {missing} "
-            "— GPE's building-photo extraction may be broken again"
+            f"{filename}: expected every row to have at least one real High Res Images candidate, but these had "
+            f"none: {missing} — GPE's building-photo extraction may be broken again"
         )
     if mismatched:
         failures.append(
-            f"{filename}: these buildings had inconsistent High Res Images across their own floor rows: {mismatched} "
-            "— a listing's own multiple floors should all share the same building photo"
+            f"{filename}: these buildings had inconsistent High Res Images candidates across their own floor rows: "
+            f"{mismatched} — a listing's own multiple floors should all share the same building photo(s)"
         )
 
-    # The critical check that would have caught the off-by-one bug: every
-    # distinct building must map to a *distinct* photo (no two different
-    # buildings sharing a URL) - a naive count-based check can't detect a
-    # photo silently attributed to the wrong (adjacent) building.
-    distinct_buildings = set(photo_by_building.keys())
-    distinct_photos = set(photo_by_building.values())
-    if len(distinct_buildings) != len(distinct_photos):
+    # The check that would have caught the off-by-one bug: every distinct
+    # building must map to a *distinct* candidate set (no two different
+    # buildings sharing a photo) - a naive count-based check can't detect
+    # a photo silently attributed to the wrong (adjacent) building.
+    all_photos = [url for urls in candidates_by_building.values() for url in urls]
+    distinct_photos = set(all_photos)
+    if len(all_photos) != len(distinct_photos):
         failures.append(
-            f"{filename}: {len(distinct_buildings)} distinct buildings mapped to only {len(distinct_photos)} distinct "
-            "High Res Images URLs — at least two different buildings are sharing a photo that should be unique to "
-            "one of them (the off-by-one misattribution bug this test was written to catch)"
+            f"{filename}: {len(all_photos)} total candidate photo(s) across all buildings but only "
+            f"{len(distinct_photos)} distinct URLs — at least one photo is being shared between two buildings "
+            "that should each have their own"
         )
 
-    if not missing and not mismatched and len(distinct_buildings) == len(distinct_photos) and floor_plan_count == 0:
+    # The check that would have caught the one-photo-per-building
+    # assumption: some buildings genuinely have 2 distinct photos, not 1.
+    count_mismatches = []
+    for building, expected in EXPECTED_CANDIDATE_COUNT.items():
+        actual = len(candidates_by_building.get(building, ()))
+        if actual != expected:
+            count_mismatches.append(f"{building}: expected {expected}, got {actual}")
+    if count_mismatches:
+        failures.append(
+            f"{filename}: unexpected High Res Images candidate count(s) for these buildings: {count_mismatches}"
+        )
+
+    if (
+        not missing
+        and not mismatched
+        and len(all_photos) == len(distinct_photos)
+        and not count_mismatches
+        and floor_plan_count == 0
+    ):
         print(
-            f"OK  {filename}: High Res Images correctly populated and distinct for all "
-            f"{len(distinct_buildings)} buildings ({len(records)} rows), Floor Plan correctly blank"
+            f"OK  {filename}: High Res Images candidates correctly populated and distinct for all "
+            f"{len(candidates_by_building)} buildings ({len(records)} rows, {len(distinct_photos)} distinct photos), "
+            "Floor Plan correctly blank"
         )
 
 

@@ -204,6 +204,17 @@ def process():
             if r["method"] == "llm" and source_path.suffix.lower() == ".pdf" and r.get("pages_text"):
                 upload_jobs.extend(_attach_pdf_images(r["records"], source_path, r["pages_text"], batch_dir, batch_id, name))
 
+            # Generic, source-agnostic finishing step: any rule (not just
+            # PDF ones) can stash a list of real candidate photo URLs on a
+            # record as "_high_res_candidates" instead of setting High Res
+            # Images directly, when it can't tell in advance whether a
+            # listing has one photo or several (extraction.rules.gpe does
+            # this — a building can genuinely have two distinct real
+            # photos, one from a promotional blurb and one from its own
+            # listing card). Turns 2+ into a small gallery page, 1 into a
+            # direct link, same as the PDF path above.
+            upload_jobs.extend(_finalize_high_res_images(r["records"], batch_dir, batch_id, name))
+
             write_xlsx(batch_dir / r["output_file"], r["records"], sheet_title=name)
 
             # Queued for the background thread below (storage.upload is a
@@ -334,6 +345,51 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
                 gallery_url_by_pages[pages_key] = _download_url(batch_id, gallery_filename)
 
         record["High Res Images"] = gallery_url_by_pages[pages_key]
+
+    return jobs
+
+
+def _finalize_high_res_images(records, batch_dir, batch_id, name):
+    """Generic counterpart to _attach_pdf_images for rules (e.g.
+    extraction.rules.gpe) that can't tell in advance whether a listing has
+    one real photo or several, so they stash candidate URLs on
+    "_high_res_candidates" instead of setting High Res Images directly.
+    Unlike the PDF case, these URLs are already externally hosted (e.g.
+    GPE's own assets-gbr.mkt.dynamics.com images) — nothing to download or
+    re-host, only a gallery page to build when there's more than one.
+
+    Same page-cell constraint as the PDF path: 2+ candidates get a small
+    self-contained gallery (reusing pdf_images.build_gallery_html, which is
+    agnostic to whether the image URLs it embeds are ours or external),
+    exactly 1 links directly. Records that share the exact same candidate
+    list (e.g. every floor of one building) share one gallery file instead
+    of a duplicate.
+
+    Returns the (storage_key, local_path) pairs for the caller to upload,
+    same convention as _attach_pdf_images — only the generated gallery HTML
+    needs uploading here, never the candidate images themselves."""
+    jobs = []
+    gallery_url_by_candidates = {}
+    gallery_count = 0
+
+    for record in records:
+        candidates = record.pop("_high_res_candidates", None)
+        if not candidates:
+            continue
+
+        key = tuple(candidates)
+        if key not in gallery_url_by_candidates:
+            if len(candidates) == 1:
+                gallery_url_by_candidates[key] = candidates[0]
+            else:
+                gallery_count += 1
+                gallery_filename = f"{name}_photos{gallery_count}.html"
+                gallery_html = pdf_images.build_gallery_html(record.get("Building") or name, candidates)
+                (batch_dir / gallery_filename).write_text(gallery_html, encoding="utf-8")
+                jobs.append((f"{batch_id}/{gallery_filename}", batch_dir / gallery_filename))
+                gallery_url_by_candidates[key] = _download_url(batch_id, gallery_filename)
+
+        record["High Res Images"] = gallery_url_by_candidates[key]
 
     return jobs
 
