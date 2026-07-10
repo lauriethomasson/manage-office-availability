@@ -260,22 +260,34 @@ def _download_url(batch_id, filename):
 
 
 def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, name):
-    """Fills High Res Images for records whose Building can be matched to
-    page(s) of the source PDF with genuine embedded photos (extraction.
-    pdf_images) — never fabricated, left blank when no match/no image
-    exists. A listing can span several pages with several real images
-    each (confirmed empirically: BC's own single-listing brochures run
-    up to 10 pages with as many as 6 images on one page) — since a
-    spreadsheet cell can only hold one hyperlink, 2+ images get a small,
-    self-contained HTML gallery page instead of just the first image
-    found; exactly 1 image links directly, no gallery indirection needed.
+    """Fills High Res Images (and, where a real one is found, Floor Plan)
+    for records whose Building can be matched to page(s) of the source PDF
+    with genuine embedded images (extraction.pdf_images) — never
+    fabricated, left blank when no match/no image exists. A listing can
+    span several pages with several real photos each (confirmed
+    empirically: BC's own single-listing brochures run up to 10 pages with
+    as many as 6 images on one page) — since a spreadsheet cell can only
+    hold one hyperlink, 2+ photos get a small, self-contained HTML gallery
+    page instead of just the first one found; exactly 1 links directly, no
+    gallery indirection needed.
 
-    A page whose own text calls out its content as a floor plan (e.g. a
-    brochure's "Example Floorplan" page) is excluded from this gallery —
-    a real, source-labeled signal, not a guess from pixel data. Floor
-    Plan itself is otherwise left alone here: this doesn't try to
-    populate it for these LLM-fallback PDFs, only keep it out of the
-    photo gallery.
+    Every matched image is classified individually as a floor-plan diagram
+    or a real photo — deliberately per-image, not per-page: confirmed on
+    Breezblok's John Stow House brochure that a floor-plan diagram and a
+    real desk photo can share the same PDF page, so an earlier per-page-
+    only classification (excluding a whole "floor plan" page from the
+    photo gallery, based only on that page's own text) missed this case
+    entirely — the page's text never mentioned "floor plan" at all, so
+    neither the page nor the diagram on it was ever excluded, and it was
+    silently swept into the photo gallery instead of populating Floor
+    Plan. See extraction.pdf_images.is_floorplan_page (source-labeled
+    text, e.g. BC's own "Example Floorplan" heading) and
+    is_floorplan_image (a pixel-content fallback for sources with no such
+    label) — either signal marks an image as the floor plan rather than a
+    photo. A listing with more than one floor-plan-classified image (not
+    seen in any source tested) just uses the first found; there's no
+    established gallery convention for Floor Plan the way there is for
+    High Res Images.
 
     Returns the (storage_key, local_path) pairs for the caller to upload —
     doesn't upload them itself, so a source with many distinct images
@@ -289,11 +301,20 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
     jobs = []
     saved_image_urls = {}  # image content hash -> already-saved download
     # URL, so the same real image isn't re-saved/re-uploaded twice across
-    # different listings/galleries that happen to include it.
-    gallery_url_by_pages = {}  # tuple(matched page numbers) -> gallery (or
-    # single-image) URL, so 2+ listings sharing the same pages (e.g. two
+    # different listings/galleries/floor-plan-links that happen to include it.
+    gallery_url_by_photos = {}  # tuple(photo URLs) -> gallery (or single-
+    # image) URL, so 2+ listings sharing the same real photos (e.g. two
     # floors of one building) share one file instead of a duplicate.
     gallery_count = 0
+
+    def _save(page_num, image_bytes, ext):
+        h = hashlib.sha256(image_bytes).hexdigest()
+        if h not in saved_image_urls:
+            image_filename = f"{name}_p{page_num + 1}_{h[:8]}.{ext}"
+            (batch_dir / image_filename).write_bytes(image_bytes)
+            jobs.append((f"{batch_id}/{image_filename}", batch_dir / image_filename))
+            saved_image_urls[h] = _download_url(batch_id, image_filename)
+        return saved_image_urls[h]
 
     for record in records:
         building = record.get("Building")
@@ -312,39 +333,40 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
         else:
             matching_pages = pdf_images.find_matching_pages(building, pages_text)
 
-        real_pages = [
-            p
-            for p in matching_pages
-            if p in page_images and not pdf_images.is_floorplan_page(pages_text[p] if p < len(pages_text) else "")
-        ]
-        if not real_pages:
+        photo_urls = []
+        floorplan_url = None
+        for p in matching_pages:
+            if p not in page_images:
+                continue
+            page_is_labeled_floorplan = pdf_images.is_floorplan_page(pages_text[p] if p < len(pages_text) else "")
+            for image_bytes, ext in page_images[p]:
+                is_floorplan = page_is_labeled_floorplan or pdf_images.is_floorplan_image(image_bytes)
+                url = _save(p, image_bytes, ext)
+                if is_floorplan:
+                    if floorplan_url is None:
+                        floorplan_url = url
+                elif url not in photo_urls:
+                    photo_urls.append(url)
+
+        if floorplan_url:
+            record["Floor Plan"] = floorplan_url
+
+        if not photo_urls:
             continue
 
-        pages_key = tuple(real_pages)
-        if pages_key not in gallery_url_by_pages:
-            image_urls = []
-            for p in pages_key:
-                for image_bytes, ext in page_images[p]:
-                    h = hashlib.sha256(image_bytes).hexdigest()
-                    if h not in saved_image_urls:
-                        image_filename = f"{name}_p{p + 1}_{h[:8]}.{ext}"
-                        (batch_dir / image_filename).write_bytes(image_bytes)
-                        jobs.append((f"{batch_id}/{image_filename}", batch_dir / image_filename))
-                        saved_image_urls[h] = _download_url(batch_id, image_filename)
-                    if saved_image_urls[h] not in image_urls:
-                        image_urls.append(saved_image_urls[h])
-
-            if len(image_urls) == 1:
-                gallery_url_by_pages[pages_key] = image_urls[0]
+        photos_key = tuple(photo_urls)
+        if photos_key not in gallery_url_by_photos:
+            if len(photo_urls) == 1:
+                gallery_url_by_photos[photos_key] = photo_urls[0]
             else:
                 gallery_count += 1
                 gallery_filename = f"{name}_gallery{gallery_count}.html"
-                gallery_html = pdf_images.build_gallery_html(building or name, image_urls)
+                gallery_html = pdf_images.build_gallery_html(building or name, photo_urls)
                 (batch_dir / gallery_filename).write_text(gallery_html, encoding="utf-8")
                 jobs.append((f"{batch_id}/{gallery_filename}", batch_dir / gallery_filename))
-                gallery_url_by_pages[pages_key] = _download_url(batch_id, gallery_filename)
+                gallery_url_by_photos[photos_key] = _download_url(batch_id, gallery_filename)
 
-        record["High Res Images"] = gallery_url_by_pages[pages_key]
+        record["High Res Images"] = gallery_url_by_photos[photos_key]
 
     return jobs
 

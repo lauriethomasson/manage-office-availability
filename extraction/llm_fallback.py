@@ -17,6 +17,20 @@ from .schema import LLM_FIELDS
 EXTRA_FIELDS = ["Sale Price"]
 ALL_FIELDS = LLM_FIELDS + EXTRA_FIELDS
 
+# Floor Plan and High Res Images are never trusted from the LLM's own text
+# extraction, unlike every other field — real links for these two are
+# always resolved afterwards from the source PDF's actual embedded images
+# (see app.py's _attach_pdf_images), the same way Link to File is always
+# overwritten regardless of what the LLM returns. Confirmed empirically on
+# a Business Cube brochure: without this, the LLM copied the brochure's
+# own "Example Floorplan" heading text into the Floor Plan field verbatim,
+# producing a plausible-looking but entirely non-clickable placeholder
+# (plain text, no hyperlink) whenever no real image match overwrote it
+# afterwards. Excluded from the prompt entirely rather than just
+# discarded after the fact, so the model doesn't waste output tokens
+# guessing at fields it was never going to be trusted for anyway.
+PROMPT_FIELDS = [f for f in ALL_FIELDS if f not in ("Floor Plan", "High Res Images")]
+
 # gemini-3.5-flash's free tier is capped at just 20 requests/day (Google's
 # newest flash-tier model). gemini-3.1-flash-lite is explicitly positioned
 # for high-volume, cost-sensitive traffic and gets a much more generous
@@ -109,7 +123,7 @@ def extract_with_llm(text, source_hint=""):
 
 
 def _build_prompt(text, source_hint):
-    fields = ", ".join(f'"{f}"' for f in ALL_FIELDS)
+    fields = ", ".join(f'"{f}"' for f in PROMPT_FIELDS)
     return (
         "You extract commercial office-space listings from arbitrary documents "
         "(broker emails, PDFs, spreadsheets) into a fixed JSON schema.\n\n"
@@ -170,5 +184,10 @@ def _parse_and_validate(raw):
         for field in ALL_FIELDS:
             v = item.get(field, "")
             record[field] = "" if v is None else str(v)
+        # Belt-and-braces: force blank even if the model returns these keys
+        # anyway (not asked for — see PROMPT_FIELDS above) or copies a
+        # source heading into them unprompted.
+        record["Floor Plan"] = ""
+        record["High Res Images"] = ""
         records.append(record)
     return records, source_name

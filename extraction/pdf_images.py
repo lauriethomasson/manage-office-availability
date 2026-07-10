@@ -138,11 +138,67 @@ def find_matching_pages(building_name, pages_text):
 def is_floorplan_page(page_text):
     """True if a page's own text calls out its content as a floor plan
     (e.g. BC's brochure literally has a page headed "Example Floorplan").
-    Used to exclude that page's images from the High Res Images photo
-    gallery — a real, source-labeled signal, not a guess from pixel
-    content, so it's precise where it fires but won't catch a floor plan
-    image on a page whose text doesn't say so."""
+    A real, source-labeled signal, not a guess from pixel content — but
+    confirmed empirically (Breezblok's John Stow House brochure) that not
+    every source labels its floor-plan page this way, so this alone isn't
+    enough; see is_floorplan_image for a per-image fallback."""
     return bool(_FLOORPLAN_TEXT_RE.search(page_text or ""))
+
+
+# A CAD-rendered floor-plan diagram is drawn on a plain white/pale
+# background, unlike either a real photo or a decorative logo/icon
+# graphic — confirmed empirically across BC's and Breezblok's own real
+# floor-plan images (69.7% and 84.9% of pixels near-white respectively)
+# versus every real photo tested (never above ~17%) and Breezblok's own
+# decorative header/footer illustration (34.5% — low unique-color count
+# like a floor plan, but nowhere near as white). 0.5 sits with a wide
+# margin on both sides of that gap.
+FLOORPLAN_WHITE_FRACTION = 0.5
+# Only need a rough estimate, so large images are downsampled first —
+# this keeps the check cheap even for a multi-megapixel source image.
+_MAX_SAMPLE_PIXELS = 400 * 400
+_SAMPLE_WIDTH = 200
+
+
+def _white_fraction(image_bytes):
+    """Fraction of an image's pixels that are near-white (all three RGB
+    channels above 235). Returns 0.0 (never mistaken for a floor plan) if
+    Pillow can't decode it, rather than raising — this is only ever an
+    extra signal on top of the existing hash/size-based filtering, never
+    something that should fail extraction."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return 0.0
+    try:
+        import io
+
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception:
+        return 0.0
+
+    w, h = im.size
+    if w * h > _MAX_SAMPLE_PIXELS and w > 0:
+        im = im.resize((_SAMPLE_WIDTH, max(1, int(_SAMPLE_WIDTH * h / w))))
+
+    total = 0
+    white = 0
+    for r, g, b in im.getdata():
+        total += 1
+        if r > 235 and g > 235 and b > 235:
+            white += 1
+    return (white / total) if total else 0.0
+
+
+def is_floorplan_image(image_bytes):
+    """True if an image's own pixel content looks like a floor-plan
+    diagram rather than a photo or decorative graphic (see
+    FLOORPLAN_WHITE_FRACTION). Deliberately a per-image check, not a
+    per-page one: confirmed on Breezblok's John Stow House brochure that
+    a floor-plan diagram and a real desk photo can share the same PDF
+    page, so classifying by page alone would wrongly keep or exclude
+    both together."""
+    return _white_fraction(image_bytes) > FLOORPLAN_WHITE_FRACTION
 
 
 def build_gallery_html(title, image_urls):
