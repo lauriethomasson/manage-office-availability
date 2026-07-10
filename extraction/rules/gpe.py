@@ -122,26 +122,40 @@ def _photo_by_building(html_items):
     same building shares its one photo, applied by name lookup below
     rather than by sequential position.
 
-    Actually viewed several of these images before wiring anything up:
-    unlike MetSpace's, every one is a real building photo, not a floor
-    plan diagram — no separate floor-plan-labeled image exists anywhere
-    in this source, so Floor Plan is deliberately left untouched here.
+    Confirmed by re-reading the raw HTML after an initial implementation
+    got this backwards: each building's photo comes immediately AFTER
+    that building's own link, not before it (a strict, alternating
+    LINK-then-IMAGE-then-LINK-then-IMAGE... run through all 9 buildings
+    in the "CURRENT AVAILABILITY" section, one real photo each, none
+    missing). The first version of this function tracked "the last image
+    seen, attribute it to the next link" — which silently attributed
+    every building's real photo to the *following* building instead, and
+    dropped the very first ("16 Dufour's Place", nothing precedes it)
+    and the very last building's photo entirely (followed by "Enquire
+    now", not another building link). Confirmed by actually viewing
+    several: every one is a real building photo, not a floor plan
+    diagram — no separate floor-plan-labeled image exists anywhere in
+    this source, so Floor Plan is deliberately left untouched here.
 
-    A stray image can precede an unrelated link (a promo "Find out more"/
-    "Read the full story" button, or an empty-text footer/social icon) —
+    A stray image can follow an unrelated link too (a promo "Find out
+    more"/"Visit website" button, or an empty-text footer/social icon) —
     harmless here since no record's Building will ever equal that link's
-    text, so the lookup below simply never matches it."""
+    text, so the lookup below simply never matches it. Only the first
+    image right after a link counts — further images before the next
+    link (e.g. several footer/social icons in a row) aren't attributed
+    to anything, since confirmed empirically each real listing has
+    exactly one photo, not several."""
     photo_by_building = {}
-    pending_image = None
+    pending_building = None
     for kind, a, b in html_items:
-        if kind == "image":
-            if "digitalassets/images" in b:
-                pending_image = b
+        if kind == "link":
+            pending_building = a
             continue
-        text = a
-        if pending_image and text:
-            photo_by_building[text] = pending_image
-        pending_image = None
+        # image
+        if pending_building and "digitalassets/images" in b:
+            if pending_building not in photo_by_building:
+                photo_by_building[pending_building] = b
+            pending_building = None
     return photo_by_building
 
 

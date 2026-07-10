@@ -72,15 +72,18 @@ def check_metspace_floor_plans(failures):
 
 
 def check_gpe_high_res_images(failures):
-    """Targeted regression test for a real bug that already shipped once:
-    GPE's rule never extracted High Res Images at all, despite the source
-    email genuinely containing a real per-building marketing photo
-    (confirmed by actually viewing several of them - real building
-    photos, unlike MetSpace's, which is why this checks High Res Images
-    specifically and not Floor Plan). Pins the exact, known-correct counts
-    for this specific example file rather than a vague ">0" check, so a
-    future regression fails loudly here instead of only being caught by
-    manually spot-checking a spreadsheet later."""
+    """Targeted regression test for a real bug that already shipped
+    *twice*: first, GPE's rule never extracted High Res Images at all,
+    despite the source email genuinely containing a real per-building
+    marketing photo (confirmed by actually viewing several - real
+    building photos, unlike MetSpace's, which is why this checks High
+    Res Images specifically and not Floor Plan). Then the fix itself had
+    an off-by-one: it attributed each building's real photo to the
+    *next* building instead, which a naive ">= N populated" count
+    entirely failed to catch, since 11 of 15 rows were still "populated"
+    — just with the wrong photo. This checks actual per-building
+    correctness, not just a count: every distinct building must map to
+    its own distinct photo URL, with zero collisions between buildings."""
     filename = "Fw_ The latest GPE Fully Managed availability – workspaces you won't want to miss..eml"
     path = ROOT / filename
     if not path.exists():
@@ -93,20 +96,7 @@ def check_gpe_high_res_images(failures):
         failures.append(f"{filename}: expected rule 'GPE' with records, got '{rule_name}'")
         return
 
-    high_res_count = sum(1 for r in records if (r.get("High Res Images") or "").strip())
     floor_plan_count = sum(1 for r in records if (r.get("Floor Plan") or "").strip())
-
-    # Known-correct for this exact example file: 11 of 15 rows have a
-    # real High Res Images photo — every building except "16 Dufour's
-    # Place" (4 of the 15 rows), which genuinely has no image preceding
-    # its link in the source HTML at all (confirmed directly, not
-    # assumed). GPE's building-name link appears once per building, not
-    # once per floor, so all floors of the same building share one URL.
-    if high_res_count < 11:
-        failures.append(
-            f"{filename}: expected >= 11 records with a real High Res Images URL, got {high_res_count}/{len(records)} "
-            "— GPE's building-photo extraction may be broken again"
-        )
     # Floor Plan should stay blank for GPE: no separate floor-plan-labeled
     # image or link exists anywhere in this source - populating it would
     # be fabricating a distinction the source doesn't actually have.
@@ -116,8 +106,53 @@ def check_gpe_high_res_images(failures):
             f"GPE's source), got {floor_plan_count}/{len(records)} populated"
         )
 
-    if high_res_count >= 11 and floor_plan_count == 0:
-        print(f"OK  {filename}: High Res Images populated for {high_res_count}/{len(records)} rows, Floor Plan correctly blank")
+    # Known-correct for this exact example file: all 15 rows, across all
+    # 9 distinct buildings, have a real High Res Images photo - none
+    # missing (confirmed by re-reading the raw HTML: every one of the 9
+    # buildings in the "CURRENT AVAILABILITY" section is immediately
+    # followed by its own real photo, none skipped).
+    photo_by_building = {}
+    mismatched = []
+    missing = []
+    for r in records:
+        building = r.get("Building")
+        photo = (r.get("High Res Images") or "").strip()
+        if not photo:
+            missing.append(building)
+            continue
+        if building in photo_by_building and photo_by_building[building] != photo:
+            mismatched.append(building)
+        photo_by_building[building] = photo
+
+    if missing:
+        failures.append(
+            f"{filename}: expected every row to have a real High Res Images photo, but these had none: {missing} "
+            "— GPE's building-photo extraction may be broken again"
+        )
+    if mismatched:
+        failures.append(
+            f"{filename}: these buildings had inconsistent High Res Images across their own floor rows: {mismatched} "
+            "— a listing's own multiple floors should all share the same building photo"
+        )
+
+    # The critical check that would have caught the off-by-one bug: every
+    # distinct building must map to a *distinct* photo (no two different
+    # buildings sharing a URL) - a naive count-based check can't detect a
+    # photo silently attributed to the wrong (adjacent) building.
+    distinct_buildings = set(photo_by_building.keys())
+    distinct_photos = set(photo_by_building.values())
+    if len(distinct_buildings) != len(distinct_photos):
+        failures.append(
+            f"{filename}: {len(distinct_buildings)} distinct buildings mapped to only {len(distinct_photos)} distinct "
+            "High Res Images URLs — at least two different buildings are sharing a photo that should be unique to "
+            "one of them (the off-by-one misattribution bug this test was written to catch)"
+        )
+
+    if not missing and not mismatched and len(distinct_buildings) == len(distinct_photos) and floor_plan_count == 0:
+        print(
+            f"OK  {filename}: High Res Images correctly populated and distinct for all "
+            f"{len(distinct_buildings)} buildings ({len(records)} rows), Floor Plan correctly blank"
+        )
 
 
 def main():
