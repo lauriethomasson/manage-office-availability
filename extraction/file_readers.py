@@ -121,7 +121,7 @@ def _read_pdf(path):
     # Per-page text (not just the joined whole), so a downstream Floor
     # Plan/High Res Images enrichment step can tell which of the source
     # PDF's own pages a given extracted listing actually came from — see
-    # extraction.pdf_images.find_matching_page.
+    # extraction.pdf_images.find_matching_pages.
     return _empty(text=text, tables=tables, file_date=file_date, pages_text=text_parts)
 
 
