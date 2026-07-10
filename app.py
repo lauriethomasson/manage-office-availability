@@ -3,6 +3,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -147,6 +148,16 @@ def process():
             r["_source_path"] = path
         results = processed_results + unsupported_results
 
+        # (storage_key, local_path) pairs, uploaded together in one
+        # background thread after the response is built rather than
+        # inline here — confirmed empirically that doing each upload
+        # synchronously (a real network round-trip per file) adds up fast
+        # once a batch needs more than a couple of them, e.g. a PDF with
+        # several distinct per-listing images (see _attach_pdf_images
+        # below): real 500s from gunicorn's default 30s worker timeout on
+        # a 20-page/43-listing source with ~15 unique images to mirror.
+        upload_jobs = []
+
         ok_results = [r for r in results if r["status"] == "ok"]
         if ok_results:
             batch_dir.mkdir(parents=True)
@@ -190,19 +201,22 @@ def process():
             # when a source PDF has none (e.g. BC) or a listing's building
             # can't be matched to a page.
             if r["method"] == "llm" and source_path.suffix.lower() == ".pdf" and r.get("pages_text"):
-                _attach_pdf_images(r["records"], source_path, r["pages_text"], batch_dir, batch_id, name)
+                upload_jobs.extend(_attach_pdf_images(r["records"], source_path, r["pages_text"], batch_dir, batch_id, name))
 
             write_xlsx(batch_dir / r["output_file"], r["records"], sheet_title=name)
 
-            # Best-effort mirror to object storage (storage.upload is a
+            # Queued for the background thread below (storage.upload is a
             # no-op returning False if S3_BUCKET etc. aren't configured) so
             # these download links keep working past Render's ephemeral
             # disk being wiped on redeploy/restart, and past our own
             # hourly local cleanup below — local disk stays the fast path,
             # this is just the durable fallback /api/download reaches for
             # when the local copy is already gone.
-            storage.upload(f"{batch_id}/{source_filename}", batch_dir / source_filename)
-            storage.upload(f"{batch_id}/{r['output_file']}", batch_dir / r["output_file"])
+            upload_jobs.append((f"{batch_id}/{source_filename}", batch_dir / source_filename))
+            upload_jobs.append((f"{batch_id}/{r['output_file']}", batch_dir / r["output_file"]))
+
+        if upload_jobs:
+            threading.Thread(target=_upload_all, args=(upload_jobs,), daemon=True).start()
 
         response_files = [
             {
@@ -240,11 +254,18 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
     exists. Floor Plan is deliberately left alone here: every embedded
     image found in the sources this was built against (Crown Estate) is a
     building photo, not a floor-plan diagram, and there's no validated way
-    to tell the two apart from image data alone, so this doesn't guess."""
+    to tell the two apart from image data alone, so this doesn't guess.
+
+    Returns the (storage_key, local_path) pairs for the caller to upload —
+    doesn't upload them itself, so a source with many distinct images
+    (e.g. Crown Estate's ~15) doesn't add that many synchronous network
+    round-trips to this request; see the background-thread upload in
+    process() above."""
     page_images = pdf_images.extract_page_images(source_path)
     if not page_images:
-        return
+        return []
 
+    jobs = []
     url_by_page = {}  # page_num -> already-saved download URL, so 2+
     # listings on the same page (e.g. two floors of one building) share
     # one saved file instead of a duplicate upload each.
@@ -257,10 +278,22 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
             image_bytes, ext = page_images[page_num][0]
             image_filename = f"{name}_p{page_num + 1}.{ext}"
             (batch_dir / image_filename).write_bytes(image_bytes)
-            storage.upload(f"{batch_id}/{image_filename}", batch_dir / image_filename)
+            jobs.append((f"{batch_id}/{image_filename}", batch_dir / image_filename))
             url_by_page[page_num] = _download_url(batch_id, image_filename)
 
         record["High Res Images"] = url_by_page[page_num]
+
+    return jobs
+
+
+def _upload_all(jobs):
+    """Runs in a background thread (see process() above) so /api/process
+    can return as soon as local disk is ready, without waiting on however
+    many real network round-trips a batch's storage.upload calls add up
+    to. Best-effort per job — one failing upload (logged inside
+    storage.upload itself) doesn't stop the rest."""
+    for key, path in jobs:
+        storage.upload(key, path)
 
 
 @app.route("/api/download/<batch_id>/<path:filename>")
