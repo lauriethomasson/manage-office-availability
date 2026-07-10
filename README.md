@@ -66,9 +66,9 @@ its generated spreadsheet, and a clear error message for anything that
 failed — so you can tell at a glance when a new source needs a proper
 parser added to `extraction/rules/`.
 
-5. **Link to Brochure** — every extracted row's `Link to Brochure` column
+5. **Link to File** — every extracted row's `Link to File` column
    is set to an absolute URL (`app.py`, `_download_url`) back to a
-   brochure artifact saved alongside the generated spreadsheet. All rows
+   source artifact saved alongside the generated spreadsheet. All rows
    from the same source file share the exact same URL, since it
    identifies the source document, not a listing. The link carries the
    access token as a query param (`?token=...`) rather than relying on
@@ -89,6 +89,21 @@ parser added to `extraction/rules/`.
    - `.docx`/`.xlsx`/`.xls`/`.csv` have no reliable native in-browser
      renderer, so they're left as normal attachment downloads of the
      original file.
+
+   **Floor Plan / High Res Images** — Kitt's-style sources get these from
+   their own table columns (`extraction/rules/grid.py`) and Knotel gets
+   Floor Plan from its email's own "Download Floorplan" link
+   (`extraction/rules/knotel.py`). For a PDF source with no rule-based
+   parser (LLM fallback — e.g. BC, Crown Estate), `extraction/pdf_images.py`
+   extracts the source PDF's own embedded images (excluding
+   logos/banners repeated across many pages), matches a listing's
+   Building name to the PDF page it came from, and links High Res Images
+   to that real, extracted photo — served `inline` like a PDF, same
+   access-token/fallback-storage behavior as everything else here. Left
+   blank whenever a source has no embedded images at all, or a listing's
+   page can't be matched — never fabricated. Floor Plan is left alone for
+   these LLM-fallback PDFs (no validated way to tell a floor-plan diagram
+   apart from a building photo purely from image data).
 
    `/api/download` always tries local disk first (fast path — the batch
    that just ran). If the local copy is gone — Render's free-tier disk is
@@ -292,7 +307,7 @@ regardless, so nothing here is meant to persist long-term.
   effectively unlimited for a low-traffic internal tool used by a few
   people, since a spun-down service doesn't consume hours.
 - **No persistent disk on the free tier**, and the disk resets on every
-  deploy/restart even on paid tiers — this is why `Link to Brochure`
+  deploy/restart even on paid tiers — this is why `Link to File`
   needs [object storage](#persistent-storage-optional) to keep working
   past that; see there if you want those links to actually last.
 - **Outbound bandwidth and build minutes** are generously capped on the
@@ -305,7 +320,7 @@ regardless, so nothing here is meant to persist long-term.
 
 ### Persistent storage (optional)
 
-Without this, `Link to Brochure` (and the generated spreadsheet's own
+Without this, `Link to File` (and the generated spreadsheet's own
 download link) only work for about an hour, or until the next
 redeploy/restart, whichever comes first — Render's disk (free tier or
 paid) doesn't survive either. `storage.py` adds an optional mirror to any

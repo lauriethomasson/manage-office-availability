@@ -65,7 +65,7 @@ def _clean_pdf_cell(cell):
 
 
 def _empty(**overrides):
-    base = {"text": "", "html": "", "links": [], "tables": [], "file_date": None}
+    base = {"text": "", "html": "", "links": [], "tables": [], "file_date": None, "pages_text": []}
     base.update(overrides)
     return base
 
@@ -102,8 +102,12 @@ def _read_pdf(path):
             file_date = _parse_pdf_date(metadata.get("CreationDate")) or _parse_pdf_date(metadata.get("ModDate"))
             for page in pdf.pages:
                 page_text = page.extract_text() or ""
-                if page_text:
-                    text_parts.append(page_text)
+                # Always append, even "" for a text-less page — pages_text
+                # below must stay index-aligned with the PDF's own 0-indexed
+                # page numbers (extraction.pdf_images iterates every page
+                # unconditionally), not just the pages that had extractable
+                # text.
+                text_parts.append(page_text)
                 for t in page.extract_tables() or []:
                     cleaned = [[_clean_pdf_cell(c) for c in row] for row in t]
                     if cleaned:
@@ -114,7 +118,11 @@ def _read_pdf(path):
     text = "\n".join(text_parts).strip()
     if not text and not tables:
         raise ValueError("No extractable text found in PDF (it may be a scanned image)")
-    return _empty(text=text, tables=tables, file_date=file_date)
+    # Per-page text (not just the joined whole), so a downstream Floor
+    # Plan/High Res Images enrichment step can tell which of the source
+    # PDF's own pages a given extracted listing actually came from — see
+    # extraction.pdf_images.find_matching_page.
+    return _empty(text=text, tables=tables, file_date=file_date, pages_text=text_parts)
 
 
 def _read_docx(path):

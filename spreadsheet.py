@@ -23,7 +23,7 @@ COORDINATE_COLS = {"Lat", "Lng"}
 # row. There is no "Photo Link" column in the current schema — only
 # these three — so nothing to add there.
 LINK_LABELS = {
-    "Link to Brochure": "Here",
+    "Link to File": "Here",
     "Floor Plan": "Floor Plan",
     "High Res Images": "High Res Images",
 }

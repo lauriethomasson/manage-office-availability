@@ -38,6 +38,7 @@ def process_files(paths):
             "provider_name": None,
             "date": None,
             "email_html": None,
+            "pages_text": None,
         }
         try:
             content = read_file(path)
@@ -53,13 +54,20 @@ def process_files(paths):
             continue
 
         # An .eml's own HTML body (already parsed by file_readers, not
-        # re-rendered) — lets app.py link Link to Brochure at that HTML
+        # re-rendered) — lets app.py link Link to File at that HTML
         # directly instead of the raw .eml, so it opens in-browser with its
         # original images (the markup already points at the sender's
         # hosted image URLs) rather than downloading a mail file. Falls
         # back to None for a plain-text-only email, or anything else.
         if path.suffix.lower() == ".eml" and content.get("html"):
             result["email_html"] = content["html"]
+
+        # Per-page PDF text, so app.py's Floor Plan/High Res Images
+        # enrichment (extraction.pdf_images) can tell which source page a
+        # given LLM-extracted listing came from — None for anything that
+        # isn't a PDF (an .eml/table-based source has no "pages" concept).
+        if path.suffix.lower() == ".pdf" and content.get("pages_text"):
+            result["pages_text"] = content["pages_text"]
 
         rule_name, raw_records = try_rules(content)
         llm_source_name = None

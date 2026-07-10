@@ -14,6 +14,7 @@ from flask import Flask, Response, abort, jsonify, render_template, request, sen
 load_dotenv()
 
 import storage
+from extraction import pdf_images
 from extraction.naming import make_unique_names
 from extraction.pipeline import process_files
 from spreadsheet import write_xlsx
@@ -40,16 +41,22 @@ CONTENT_TYPES = {
     ".eml": "message/rfc822",
     ".html": "text/html",
     ".htm": "text/html",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
 }
 # Extensions a browser can render natively — served as `inline` so
-# clicking Link to Brochure opens it directly in-browser instead of
+# clicking Link to File opens it directly in-browser instead of
 # downloading. PDFs use the browser's built-in PDF viewer. .html/.htm
 # covers the HTML brochure saved for .eml sources below (the email's own
 # HTML body, not a raw .eml) — it opens like the original email,
 # including images, since that markup already points at the sender's
-# hosted image URLs. DOCX/XLSX/CSV have no reliable native in-browser
-# renderer, so they're deliberately left out — normal downloads for those.
-INLINE_EXTENSIONS = {".pdf", ".html", ".htm"}
+# hosted image URLs. Images (Floor Plan/High Res Images, extracted from a
+# source PDF by extraction.pdf_images) should open directly too, same as
+# a PDF, rather than force a download. DOCX/XLSX/CSV have no reliable
+# native in-browser renderer, so they're deliberately left out — normal
+# downloads for those.
+INLINE_EXTENSIONS = {".pdf", ".html", ".htm", ".jpg", ".jpeg", ".png"}
 
 # Set in the hosting platform's environment variables (never committed). If
 # unset, the app runs "open" with no path/token gating — fine for local dev,
@@ -147,12 +154,12 @@ def process():
         for r, name in zip(ok_results, unique_names):
             r["output_file"] = f"{name}.xlsx"
 
-            # Persist the brochure artifact alongside the generated
-            # spreadsheet, and point every extracted row's "Link to
-            # Brochure" at it so the spreadsheet is traceable back to
-            # where the data came from. Reuses the same collision-free
-            # `name` the spreadsheet got, so it can't collide with another
-            # source file in this batch.
+            # Persist the source artifact alongside the generated
+            # spreadsheet, and point every extracted row's "Link to File"
+            # at it so the spreadsheet is traceable back to where the data
+            # came from. Reuses the same collision-free `name` the
+            # spreadsheet got, so it can't collide with another source
+            # file in this batch.
             #
             # An .eml with an HTML body links to that HTML directly
             # (extraction.pipeline already parsed it out, unmodified) —
@@ -172,7 +179,18 @@ def process():
             r["source_file"] = source_filename
             source_url = _download_url(batch_id, source_filename)
             for record in r["records"]:
-                record["Link to Brochure"] = source_url
+                record["Link to File"] = source_url
+
+            # Floor Plan/High Res Images for a PDF source with no
+            # rule-based parser (LLM fallback) — Kitt's already gets these
+            # from its own table columns (extraction.rules.grid) and
+            # Knotel already gets Floor Plan from its email's own "Download
+            # Floorplan" link (extraction.rules.knotel); neither goes
+            # through this. Real embedded images only — genuinely blank
+            # when a source PDF has none (e.g. BC) or a listing's building
+            # can't be matched to a page.
+            if r["method"] == "llm" and source_path.suffix.lower() == ".pdf" and r.get("pages_text"):
+                _attach_pdf_images(r["records"], source_path, r["pages_text"], batch_dir, batch_id, name)
 
             write_xlsx(batch_dir / r["output_file"], r["records"], sheet_title=name)
 
@@ -213,6 +231,36 @@ def _download_url(batch_id, filename):
     scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
     token_part = f"?token={quote(ACCESS_TOKEN)}" if ACCESS_TOKEN else ""
     return f"{scheme}://{request.host}/api/download/{quote(batch_id)}/{quote(filename)}{token_part}"
+
+
+def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, name):
+    """Fills High Res Images for records whose Building can be matched to
+    a page of the source PDF that has a genuine embedded photo (extraction.
+    pdf_images) — never fabricated, left blank when no match/no image
+    exists. Floor Plan is deliberately left alone here: every embedded
+    image found in the sources this was built against (Crown Estate) is a
+    building photo, not a floor-plan diagram, and there's no validated way
+    to tell the two apart from image data alone, so this doesn't guess."""
+    page_images = pdf_images.extract_page_images(source_path)
+    if not page_images:
+        return
+
+    url_by_page = {}  # page_num -> already-saved download URL, so 2+
+    # listings on the same page (e.g. two floors of one building) share
+    # one saved file instead of a duplicate upload each.
+    for record in records:
+        page_num = pdf_images.find_matching_page(record.get("Building"), pages_text)
+        if page_num is None or page_num not in page_images:
+            continue
+
+        if page_num not in url_by_page:
+            image_bytes, ext = page_images[page_num][0]
+            image_filename = f"{name}_p{page_num + 1}.{ext}"
+            (batch_dir / image_filename).write_bytes(image_bytes)
+            storage.upload(f"{batch_id}/{image_filename}", batch_dir / image_filename)
+            url_by_page[page_num] = _download_url(batch_id, image_filename)
+
+        record["High Res Images"] = url_by_page[page_num]
 
 
 @app.route("/api/download/<batch_id>/<path:filename>")

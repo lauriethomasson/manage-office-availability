@@ -15,7 +15,7 @@ KEYWORDS = {
     "Desks (max)": [["desk"]],
     "Marketing Price (Based on Min Term) PCM": [["pcm"]],
     "Marketing Price (Based on Min Term) PSF": [["psf"]],
-    "Link to Brochure": [["brochure"]],
+    "Link to File": [["brochure"]],
     "Min. Term": [["min", "term"]],
     "Special Features": [["special"], ["feature"]],
     "State of Space": [["state"]],

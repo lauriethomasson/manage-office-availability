@@ -87,7 +87,7 @@ def parse(content):
                     "Desks (max)": seats,
                     "Marketing Price (Based on Min Term) PCM": _strip_units(price_monthly, "pcm"),
                     "Marketing Price (Based on Min Term) PSF": _strip_units(price_psf, "per sqft"),
-                    "Link to Brochure": group.get("brochure", ""),
+                    "Link to File": group.get("brochure", ""),
                     "Floor Plan": group.get("floorplan", ""),
                 }
             )
