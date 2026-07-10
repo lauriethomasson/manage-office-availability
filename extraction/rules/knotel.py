@@ -133,7 +133,16 @@ def _group_items(items):
     for kind, a, b in items:
         if kind == "image":
             if "featured image" in a.lower():
-                pending_image = b
+                # The <img> tag's own src carries Directus's on-the-fly
+                # transform params (?width=600&height=300&quality=70&
+                # format=jpeg&fit=cover&v=...) - that's a deliberately
+                # shrunk/compressed thumbnail sized for the email, not the
+                # original. Confirmed empirically this also caused
+                # "Illegal asset transformation" errors on some assets, and
+                # that dropping the query string entirely (same idea as
+                # Floor Plan's own "?download=" link, no resize params at
+                # all) serves the real, full-resolution original instead.
+                pending_image = b.split("?", 1)[0]
             continue
 
         text, href = a, b
