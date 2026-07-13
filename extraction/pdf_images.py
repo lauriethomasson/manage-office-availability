@@ -87,6 +87,13 @@ def scan_pages(path):
                 # hashing; that's the whole point of this pass.
     finally:
         doc.close()
+        try:
+            # See load_page_images' own finally block for why this is
+            # here — MuPDF's process-global store isn't freed just
+            # because this Document closed.
+            fitz.TOOLS.store_shrink(100)
+        except Exception:
+            pass
 
     boilerplate = {h for h, pages in hash_pages.items() if len(pages) > BOILERPLATE_MAX_PAGES}
 
@@ -149,6 +156,23 @@ def load_page_images(path, page_num, allowed_hashes):
         return result
     finally:
         doc.close()
+        # MuPDF keeps a process-global store (fonts/images) that speeds up
+        # repeated rendering of the SAME document across calls — not
+        # something Python's own refcounting/gc touches, and not released
+        # just because this Document was closed. This function is called
+        # once per (page, record-match), so a document with many
+        # buildings/pages can trigger dozens of open/close cycles within
+        # a single request; shrinking the store back down after each one
+        # keeps that process-global cache from quietly ratcheting up
+        # across those calls (confirmed no measurable difference on this
+        # app's own current example PDFs, whose images are small — kept
+        # anyway as cheap, standard PyMuPDF hygiene for memory-constrained
+        # deployments, since a future source with larger/more embedded
+        # photos is exactly the case this would matter for).
+        try:
+            fitz.TOOLS.store_shrink(100)
+        except Exception:
+            pass
 
 
 def extract_page_images(path):
