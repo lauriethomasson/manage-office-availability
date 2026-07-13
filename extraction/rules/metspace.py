@@ -103,37 +103,56 @@ def _attach_floor_plans(records, html_items):
     alt company logo instead).
 
     Confirmed by actually viewing several of these images that every one
-    is a floor plan diagram, not a building photo — despite looking, at
-    the HTML level, exactly like Knotel's own "featured image" pattern
-    (one image immediately preceding the listing's own link). Goes into
-    Floor Plan, not High Res Images, for that reason; High Res Images is
-    deliberately left blank for MetSpace since no second, genuinely-photo
-    image exists per listing in this source.
+    is a floor plan diagram, not a building photo. Goes into Floor Plan,
+    not High Res Images, for that reason; High Res Images is deliberately
+    left blank for MetSpace since no second, genuinely-photo image exists
+    per listing in this source.
 
-    Confirmed empirically this is NOT a simple positional pairing either:
-    the first listing in a real example has no image at all, and a stray
-    trailing image precedes unrelated footer content (a broker's own
-    headshot near the signature block, not a floor plan) rather than
-    another listing. So this walks the real (image, link) stream in order
-    and only consumes an image for the next record still waiting for one
-    when the following link's text actually matches that record's own
-    Building — never assumed from position/count alone."""
+    Direction confirmed directly against this source's raw HTML (not
+    inherited from Knotel or GPE): each image FOLLOWS the listing link it
+    belongs to, not precedes it — e.g. "9-10 Market Place"'s own link is
+    immediately followed by its image, then "43-45 Charlotte Street"'s
+    link, then its own image, and so on. An earlier version of this
+    function assumed the opposite direction (image precedes link, mirrored
+    from Knotel's pattern) — that assumption was wrong for MetSpace and
+    silently shifted every image onto the *next* record instead of its
+    own, including leaving the first listing incorrectly blank (it does
+    have a real image; it had been misattributed to the second listing).
+
+    Still not a simple positional pairing — a non-matching, non-image item
+    (e.g. a blank spacer link, or the footer's phone/email links right
+    after the last real listing) can sit between a link and its image, or
+    can mark that no image exists for a given listing at all. So this only
+    consumes an image for the record whose own link was *just* seen, and
+    stops looking for that record's image (leaving it blank) the moment
+    another non-blank link shows up first — never assumed from
+    position/count alone."""
     idx = 0
-    pending_image = None
-    for kind, a, b in html_items:
-        if idx >= len(records):
-            break
-        if kind == "image":
-            if "mcusercontent.com" in b and a.strip().lower() != "logo":
-                pending_image = b
-            continue
-        text = a
-        building = records[idx].get("Building") or ""
-        if building and (text == building or text.startswith(building) or building in text):
-            if pending_image:
-                records[idx]["Floor Plan"] = pending_image
-            idx += 1
-        pending_image = None
+    n = len(html_items)
+    i = 0
+    while i < n and idx < len(records):
+        kind, a, b = html_items[i]
+        if kind == "link":
+            text = a
+            building = records[idx].get("Building") or ""
+            if building and (text == building or text.startswith(building) or building in text):
+                j = i + 1
+                while j < n:
+                    kind2, a2, b2 = html_items[j]
+                    if kind2 == "image":
+                        if "mcusercontent.com" in b2 and a2.strip().lower() != "logo":
+                            records[idx]["Floor Plan"] = b2
+                            break
+                        j += 1
+                        continue
+                    if a2:
+                        # A subsequent non-blank link (the next listing, or
+                        # footer contact info) showed up before any image
+                        # did — this record genuinely has no image.
+                        break
+                    j += 1
+                idx += 1
+        i += 1
 
 
 def _max_desks(desc):

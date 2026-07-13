@@ -27,17 +27,23 @@ EXPECTATIONS = [
 
 
 def check_metspace_floor_plans(failures):
-    """Targeted regression test for a real bug that already shipped once:
-    MetSpace's rule never extracted Floor Plan/High Res Images at all,
-    despite the source email genuinely containing a per-listing floor
-    plan image (confirmed by actually viewing several of them - real
+    """Targeted regression test for two real bugs that already shipped:
+    MetSpace's rule originally never extracted Floor Plan/High Res Images
+    at all, despite the source email genuinely containing a per-listing
+    floor plan image (confirmed by actually viewing several of them - real
     floor-plan diagrams, not building photos, which is why this checks
-    Floor Plan specifically and not High Res Images). Pins the exact,
-    known-correct counts for this specific example file rather than a
-    vague ">0" check, so a future regression (e.g. someone "fixing" the
-    html_items image filter and breaking this again) fails loudly here
-    instead of only being caught by manually spot-checking a spreadsheet
-    later."""
+    Floor Plan specifically and not High Res Images). The fix for that was
+    then found to have the image-to-listing direction backwards (assumed
+    "image precedes link", inherited from Knotel's pattern, when this
+    source's own raw HTML is actually "image follows link" - the same
+    class of off-by-one as GPE's High Res Images bug) - confirmed by
+    walking the raw html_items sequence directly, which is why every one
+    of the 14 listings has a real, distinct floor plan image, not 13/14.
+    Pins the exact, known-correct count for this specific example file
+    rather than a vague ">0" check, so a future regression (e.g. someone
+    "fixing" the html_items image filter, or re-flipping the direction,
+    and breaking this again) fails loudly here instead of only being
+    caught by manually spot-checking a spreadsheet later."""
     filename = "Fw_ MetSpace Availability Update.eml"
     path = ROOT / filename
     if not path.exists():
@@ -52,14 +58,21 @@ def check_metspace_floor_plans(failures):
 
     floor_plan_count = sum(1 for r in records if (r.get("Floor Plan") or "").strip())
     high_res_count = sum(1 for r in records if (r.get("High Res Images") or "").strip())
+    distinct_floor_plans = len({r["Floor Plan"] for r in records if (r.get("Floor Plan") or "").strip()})
 
-    # Known-correct for this exact example file: 13 of 14 listings have a
-    # real floor plan image; the first listing genuinely has none (no
-    # image precedes its link in the source HTML at all) - not a bug.
-    if floor_plan_count < 13:
+    # Known-correct for this exact example file: all 14 listings have a
+    # real, distinct floor plan image — confirmed directly against the raw
+    # HTML (each listing's link is immediately followed by its own image).
+    if floor_plan_count != 14:
         failures.append(
-            f"{filename}: expected >= 13 records with a real Floor Plan URL, got {floor_plan_count}/{len(records)} "
+            f"{filename}: expected all 14 records to have a real Floor Plan URL, got {floor_plan_count}/{len(records)} "
             "— MetSpace's floor-plan-image extraction may be broken again"
+        )
+    if distinct_floor_plans != floor_plan_count:
+        failures.append(
+            f"{filename}: expected every populated Floor Plan to be distinct, got only {distinct_floor_plans} distinct "
+            f"URLs across {floor_plan_count} populated rows — a listing may be getting a neighbor's image "
+            "(the image-follows-link direction may have regressed to image-precedes-link)"
         )
     # High Res Images should stay blank for MetSpace: the only embedded
     # image per listing in this source is a floor plan, not a photo -
@@ -71,8 +84,8 @@ def check_metspace_floor_plans(failures):
             f"floor plan, not a photo), got {high_res_count}/{len(records)} populated"
         )
 
-    if floor_plan_count >= 13 and high_res_count == 0:
-        print(f"OK  {filename}: Floor Plan populated for {floor_plan_count}/{len(records)} rows, High Res Images correctly blank")
+    if floor_plan_count == 14 and distinct_floor_plans == 14 and high_res_count == 0:
+        print(f"OK  {filename}: Floor Plan populated with {distinct_floor_plans} distinct URLs for all {len(records)} rows, High Res Images correctly blank")
 
 
 def check_gpe_high_res_images(failures):
