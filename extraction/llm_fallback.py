@@ -207,7 +207,10 @@ def _build_prompt(text, source_hint):
         "same building's other listings elsewhere in the document don't repeat it.\n"
         "- \"Contacts\" should list every named contact/broker/agent for that listing, comma-separated "
         "(e.g. \"Kieran Christie, Sophie Haugh, Nicki Mayle\") — however many are actually given, not "
-        "just one or two.\n"
+        "just one or two. If the source names no individual person but does give a company/agency "
+        "acting as sole agent (e.g. \"Strictly by appointment through the sole agents, Acme Realty\"), "
+        "use that company name instead — only use \"\" if the source gives no contact of any kind, "
+        "named or otherwise.\n"
         "- \"Special Features\" can combine any descriptive text that doesn't fit another field.\n"
         '- "Sale Price" is a distinct per-listing sale price, only if the source explicitly lists one '
         "separate from its rental price (e.g. a table with both a \"Market Price\" rental column and a "
