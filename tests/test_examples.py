@@ -23,6 +23,8 @@ EXPECTATIONS = [
     ("Fw_ MetSpace Availability Update.eml", "MetSpace", 14),
     ("Fw_ The latest GPE Fully Managed availability – workspaces you won't want to miss..eml", "GPE", 15),
     ("Kitt's Availability (External) - Live Availability.pdf", "Grid/Tabular", 19),
+    ("BC Current Availability.pdf", "BC", 11),
+    ("John Stow House.pdf", "Breezblok", 1),
 ]
 
 
@@ -218,6 +220,134 @@ def check_gpe_high_res_images(failures):
         )
 
 
+def check_bc_records(failures):
+    """Targeted regression test for extraction.rules.bc, pinning known-correct
+    field values from the real "BC Current Availability.pdf" table.
+
+    Also guards against a real bug this rule already had: an earlier,
+    looser version of its detect() (generic single-word keywords, the same
+    style as extraction.rules.grid) matched Kitt's own table too, since
+    Kitt's header already uses near-schema wording ("Building", "Floor/
+    Unit", "Size (sq ft)", "Desks (max)", "Marketing Price...PCM") that a
+    loose keyword count can't tell apart from BC's own generic English
+    column names. Fixed by requiring BC's own distinctive "Num of Desks" +
+    "Sale Price" combination, which Kitt's table doesn't have — this test
+    would catch a future regression back to that looser detection by
+    failing the "got 'BC'" assertion in the main EXPECTATIONS loop above
+    for Kitt's own file, but pins the BC-specific values here too so a
+    change to bc.py's column mapping doesn't silently misparse a value."""
+    filename = "BC Current Availability.pdf"
+    path = ROOT / filename
+    if not path.exists():
+        failures.append(f"{filename}: example file not found (expected at {path})")
+        return
+
+    content = read_file(path)
+    rule_name, records = try_rules(content)
+    if rule_name != "BC" or not records:
+        failures.append(f"{filename}: expected rule 'BC' with records, got '{rule_name}'")
+        return
+
+    normalized = [normalize_record(r) for r in records]
+    by_key = {(r["Building"], r["Floor/Unit"]): r for r in normalized}
+
+    # A handful of known rows, re-verified directly against the source
+    # table — covers a row with a real Sale Price (For Sale should be
+    # "Yes"), a row with "N/A" (For Sale should be "No"), and the PCM/PSF
+    # derivation (this source only gives PCM; PSF must be computed).
+    checks = [
+        (
+            ("10-12 Alie Street", "G & LG Duplex"),
+            {
+                "Size (sq ft)": 4800,
+                "Desks (max)": 70,
+                "Marketing Price (Based on Min Term) PCM": 48000,
+                "Marketing Price (Based on Min Term) PSF": 120.0,
+                "Special Features": "Communal Lounge, Break-out & Terrace",
+                "For Sale": "Yes",
+            },
+        ),
+        (
+            ("17 Bevis Marks", "3rd Floor"),
+            {
+                "Size (sq ft)": 3200,
+                "Desks (max)": 50,
+                "Marketing Price (Based on Min Term) PCM": 35000,
+                "For Sale": "No",
+            },
+        ),
+        (
+            ("Porters Place", "4th Floor"),
+            {
+                "Size (sq ft)": 3476,
+                "Desks (max)": 50,
+                "Marketing Price (Based on Min Term) PCM": 55036,
+                "State of Space": "Immediate",
+                "For Sale": "No",
+            },
+        ),
+    ]
+    local_failures = []
+    for key, expected in checks:
+        row = by_key.get(key)
+        if not row:
+            local_failures.append(f"{filename}: expected a row for {key}, not found")
+            continue
+        for field, expected_value in expected.items():
+            if row.get(field) != expected_value:
+                local_failures.append(
+                    f"{filename}: {key} field {field!r} expected {expected_value!r}, got {row.get(field)!r}"
+                )
+
+    if len(records) != 11:
+        local_failures.append(f"{filename}: expected 11 records, got {len(records)}")
+
+    if not local_failures:
+        print(f"OK  {filename}: {len(records)} BC records spot-checked against known-correct source values")
+    failures.extend(local_failures)
+
+
+def check_breezblok_records(failures):
+    """Targeted regression test for extraction.rules.breezblok, pinning
+    known-correct field values from the real "John Stow House.pdf"
+    brochure — a single-listing, multi-page format where the building's
+    own address/postcode and the listing's own size/desks/price sit on
+    different pages, not one table."""
+    filename = "John Stow House.pdf"
+    path = ROOT / filename
+    if not path.exists():
+        failures.append(f"{filename}: example file not found (expected at {path})")
+        return
+
+    content = read_file(path)
+    rule_name, records = try_rules(content)
+    if rule_name != "Breezblok" or not records:
+        failures.append(f"{filename}: expected rule 'Breezblok' with records, got '{rule_name}'")
+        return
+    if len(records) != 1:
+        failures.append(f"{filename}: expected exactly 1 record (one 'Proposed space' section), got {len(records)}")
+        return
+
+    norm = normalize_record(records[0])
+    expected = {
+        "Building": "John Stow House, 18 Bevis Marks, London EC3A 7JB",
+        "Floor/Unit": "Office 302",
+        "Size (sq ft)": 1750,
+        "Desks (max)": 32,
+        "Marketing Price (Based on Min Term) PCM": 18000,
+        "Contacts": "Sales",
+        "Property Postcode": "EC3A 7JB",
+    }
+    local_failures = [
+        f"{filename}: field {field!r} expected {expected_value!r}, got {norm.get(field)!r}"
+        for field, expected_value in expected.items()
+        if norm.get(field) != expected_value
+    ]
+    if not local_failures:
+        print(f"OK  {filename}: Breezblok record spot-checked against known-correct source values")
+    failures.extend(local_failures)
+
+
 def check_pdf_floorplan_vs_photos(failures, filename, building, name, expect_gallery):
     """Targeted regression test for two real bugs found in the same
     classification step, across two different PDF sources:
@@ -382,6 +512,8 @@ def main():
 
     check_metspace_floor_plans(failures)
     check_gpe_high_res_images(failures)
+    check_bc_records(failures)
+    check_breezblok_records(failures)
     check_pdf_floorplan_vs_photos(
         failures,
         filename="2nd Floor - 2-7 Clerkenwell Green Brochure.pdf",

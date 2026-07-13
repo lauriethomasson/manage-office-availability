@@ -37,9 +37,10 @@ instead (see [Deployment](#deployment-render) for why).
 1. **Read** — each uploaded file's raw text/tables are extracted based on
    its type (PDF, DOCX, XLSX/CSV, EML, HTML).
 2. **Rule-based extraction first** — a handful of parsers recognize known
-   layouts (currently: Knotel, MetSpace, and GPE broker emails, plus a
-   generic "grid" parser for any spreadsheet/PDF whose columns already
-   resemble the target schema). This is fast and free.
+   layouts (currently: Knotel, MetSpace, and GPE broker emails; BC's own
+   "Current Availability" summary table; Breezblok's single-listing
+   brochure PDF; plus a generic "grid" parser for any spreadsheet/PDF whose
+   columns already resemble the target schema). This is fast and free.
 3. **LLM fallback** — if nothing recognizes the file, its raw text is sent
    to Gemini, which is asked to return structured JSON matching the target
    schema, plus its best guess at the sender/broker name. The response is
@@ -52,8 +53,9 @@ instead (see [Deployment](#deployment-render) for why).
    *"Gemini's daily AI-extraction limit has been reached for today. This
    resets at midnight Pacific Time — 08:00 UK time, in about 21 hours.
    This file needs the AI fallback because no known-provider parser
-   (Knotel, MetSpace, GPE, Kitts) recognized its layout — files that DO
-   match one of those aren't affected and will still process normally."*
+   (Knotel, MetSpace, GPE, Kitts, BC, Breezblok) recognized its layout —
+   files that DO match one of those aren't affected and will still process
+   normally."*
    — never a raw exception dump, and never implying the whole app/batch
    is down (`extraction/quota.py`, shared with the address-search quota
    note below).
@@ -65,13 +67,14 @@ instead (see [Deployment](#deployment-render) for why).
 
    Note: this is a genuinely *separate* Gemini quota from the address-search
    one below (different model, different daily limit) — a rule-based file
-   (Knotel/MetSpace/GPE/Kitts) never reaches this specific quota at all,
-   but can still carry a warning of its own if the address-search quota
-   (below) is what's exhausted, since that's a per-*building* concern, not
-   tied to which parser matched the file.
+   (Knotel/MetSpace/GPE/Kitts/BC/Breezblok) never reaches this specific
+   quota at all, but can still carry a warning of its own if the
+   address-search quota (below) is what's exhausted, since that's a
+   per-*building* concern, not tied to which parser matched the file.
 4. **One spreadsheet per file** — each source file gets its own `.xlsx`,
    named after the identified provider:
-   - Knotel/MetSpace/GPE emails → `Knotel.xlsx`, `MetSpace.xlsx`, `GPE.xlsx`
+   - Knotel/MetSpace/GPE/BC/Breezblok → `Knotel.xlsx`, `MetSpace.xlsx`,
+     `GPE.xlsx`, `BC.xlsx`, `Breezblok.xlsx`
    - Anything else → the LLM's identified sender name if it's confident,
      otherwise a cleaned-up version of the original filename (e.g.
      `Kitt's Availability (External)....pdf` → `Kitts.xlsx`)
@@ -117,10 +120,14 @@ parser added to `extraction/rules/`.
    **Floor Plan / High Res Images** — Kitt's-style sources get these from
    their own table columns (`extraction/rules/grid.py`) and Knotel gets
    Floor Plan from its email's own "Download Floorplan" link
-   (`extraction/rules/knotel.py`). For a PDF source with no rule-based
-   parser (LLM fallback — e.g. BC, Crown Estate), `extraction/pdf_images.py`
-   extracts the source PDF's own embedded images (excluding
-   logos/banners repeated across many pages).
+   (`extraction/rules/knotel.py`). For any other PDF source — BC's brochure
+   format, Breezblok, Crown Estate, or anything still on the LLM fallback —
+   `extraction/pdf_images.py` extracts the source PDF's own embedded images
+   (excluding logos/banners repeated across many pages) regardless of
+   whether a rule or the LLM fallback extracted that PDF's listing data
+   (`app.py`'s `PDF_IMAGE_ENRICHED_METHODS`). BC's own "Current
+   Availability" table (a different PDF format from its brochures) has no
+   embedded images at all, so this step is a harmless no-op for it.
 
    Floor Plan can come from two different signals, checked in this order:
    1. A link annotation the source itself placed directly on top of a
@@ -423,9 +430,11 @@ falling back to a filename guess.
 python tests\test_examples.py
 ```
 
-Runs the three example broker emails and the example PDF through the
-rule-based parsers and checks the record counts — a quick regression check
-that nothing has silently broken.
+Runs every example source file (broker emails and PDFs, one per known rule
+— Knotel, MetSpace, GPE, Kitts/Grid, BC, Breezblok) through the rule-based
+parsers, checks record counts, and pins known-correct field values/images
+for the sources that have had real extraction bugs before — a quick
+regression check that nothing has silently broken.
 
 ## Deployment (Render)
 

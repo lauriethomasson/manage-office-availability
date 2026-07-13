@@ -8,12 +8,14 @@ Each module exposes:
 The pipeline tries each rule's detect() in order and uses the first match's
 parse(). If none match, it falls back to the LLM.
 """
-from . import knotel, metspace, gpe, grid
+from . import knotel, metspace, gpe, bc, breezblok, grid
 
 RULES = [
     ("Knotel", knotel),
     ("MetSpace", metspace),
     ("GPE", gpe),
+    ("BC", bc),
+    ("Breezblok", breezblok),
     ("Grid/Tabular", grid),
 ]
 

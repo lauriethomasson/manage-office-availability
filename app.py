@@ -27,6 +27,14 @@ OUTPUT_DIR = BASE_DIR / "output"
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xls", ".csv", ".eml", ".html", ".htm"}
 BATCH_MAX_AGE_SECONDS = 60 * 60  # clean up old batch output dirs after an hour
 
+# process()'s `method` values whose own extraction (rule or LLM) supplies no
+# image data at all, so a PDF source needs extraction.pdf_images' own
+# position-based real-image enrichment for Floor Plan/High Res Images.
+# Deliberately explicit (not "any rule other than grid/knotel") so adding a
+# future rule-based PDF parser that DOES supply its own images from its own
+# table/link structure doesn't silently get double-processed here.
+PDF_IMAGE_ENRICHED_METHODS = {"llm", "rule:BC", "rule:Breezblok"}
+
 # Explicit Content-Type per extension for /api/download, rather than
 # relying on send_file's default (Python's mimetypes module, which is
 # backed by the OS's own registry/mime.types and is NOT consistent across
@@ -261,15 +269,18 @@ def process():
             for record in r["records"]:
                 record["Link to File"] = source_url
 
-            # Floor Plan/High Res Images for a PDF source with no
-            # rule-based parser (LLM fallback) — Kitt's already gets these
-            # from its own table columns (extraction.rules.grid) and
-            # Knotel already gets Floor Plan from its email's own "Download
-            # Floorplan" link (extraction.rules.knotel); neither goes
-            # through this. Real embedded images only — genuinely blank
-            # when a source PDF has none (e.g. BC) or a listing's building
-            # can't be matched to a page.
-            if r["method"] == "llm" and source_path.suffix.lower() == ".pdf" and r.get("pages_text"):
+            # Floor Plan/High Res Images for a PDF source whose own rule (or
+            # the LLM fallback) doesn't already supply them from its own
+            # text/table structure — Kitt's already gets these from its own
+            # table columns (extraction.rules.grid) and Knotel already gets
+            # Floor Plan from its email's own "Download Floorplan" link
+            # (extraction.rules.knotel); neither goes through this. BC and
+            # Breezblok are rule-based (extraction.rules.bc/breezblok) but,
+            # like the LLM fallback, their own text has no image data at
+            # all — real embedded images only — genuinely blank when a
+            # source PDF has none (BC's own table has none at all) or a
+            # listing's building can't be matched to a page.
+            if r["method"] in PDF_IMAGE_ENRICHED_METHODS and source_path.suffix.lower() == ".pdf" and r.get("pages_text"):
                 memlog.log("before image extraction", r["filename"])
                 upload_jobs.extend(_attach_pdf_images(r["records"], source_path, r["pages_text"], batch_dir, batch_id, name))
                 memlog.log("after image extraction", r["filename"])
