@@ -100,11 +100,15 @@ def process_files(paths):
     {filename, status: "ok"|"error", method: "rule:<Name>"|"llm"|None,
      records, record_count, error, warning, provider_name, date}
     provider_name/date/records are only meaningful when status == "ok".
-    warning is set alongside a normal "ok" status/None error — a file
-    that extracted successfully but hit Gemini's daily quota partway
-    through its own address-lookup fallback (some rows' Lat/Lng/postcode
-    fell back further than usual, to a less reliable bare-name Nominatim
-    match) rather than something that failed the file itself.
+    warning is set alongside a normal "ok" status/None error — either or
+    both of: a PDF bigger than what's actually been tested end-to-end
+    (extraction.file_readers.TESTED_MAX_PDF_PAGES/TESTED_MAX_PDF_BYTES —
+    distinct from that module's own hard MAX_PDF_PAGES ceiling, which is
+    a real error instead), and/or a file that extracted successfully but
+    hit Gemini's daily quota partway through its own address-lookup
+    fallback (some rows' Lat/Lng/postcode fell back further than usual,
+    to a less reliable bare-name Nominatim match) — neither is something
+    that failed the file itself.
     """
     results = []
 
@@ -137,6 +141,16 @@ def process_files(paths):
             results.append(result)
             continue
         memlog.log("after file parsing", filename)
+
+        # Set as soon as it's known (rather than only at the very end)
+        # so a later warning — e.g. Gemini quota exhaustion, below — can
+        # append to it instead of clobbering it; see extraction.
+        # file_readers.TESTED_MAX_PDF_PAGES/TESTED_MAX_PDF_BYTES for what
+        # this is actually based on (a real, repeatedly-tested figure,
+        # not a guess) and why it's a warning, not an error, unlike the
+        # separate hard MAX_PDF_PAGES ceiling.
+        if content.get("size_warning"):
+            result["warning"] = content["size_warning"]
 
         # An .eml's own HTML body (already parsed by file_readers, not
         # re-rendered) — lets app.py link Link to File at that HTML
@@ -196,13 +210,16 @@ def process_files(paths):
             # address had to fall back to the web-search tier and hit the
             # daily limit there specifically (a plain building name with
             # no street/postcode in the source at all — see
-            # _geocode_records below).
-            result["warning"] = (
+            # _geocode_records below). Appended, not overwritten — a
+            # large/untested-size warning may already be set above, and a
+            # file can genuinely have both going on at once.
+            quota_note = (
                 quota.reset_message("Gemini's daily address-search limit")
                 + " Some rows' Property Address/Postcode/Lat/Lng fell back to a plain "
                 "building-name lookup, which is less reliable — worth a manual check "
                 'for any row marked "(Not in source text)".'
             )
+            result["warning"] = f"{result['warning']} {quota_note}" if result["warning"] else quota_note
 
         # Prefer the source document's own date (email Date header, or PDF/
         # DOCX metadata) over processing time, so External Ref reflects when

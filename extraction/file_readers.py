@@ -65,7 +65,16 @@ def _clean_pdf_cell(cell):
 
 
 def _empty(**overrides):
-    base = {"text": "", "html": "", "links": [], "html_items": [], "tables": [], "file_date": None, "pages_text": []}
+    base = {
+        "text": "",
+        "html": "",
+        "links": [],
+        "html_items": [],
+        "tables": [],
+        "file_date": None,
+        "pages_text": [],
+        "size_warning": None,
+    }
     base.update(overrides)
     return base
 
@@ -94,6 +103,22 @@ def _parse_pdf_date(raw):
 # tier's constraints fails fast with a clear reason instead of a long
 # processing attempt that then still risks a timeout or OOM.
 MAX_PDF_PAGES = 300
+
+# Distinct from MAX_PDF_PAGES above: this is what's actually been proven
+# end-to-end (real HTTP request -> LLM extraction -> geocoding -> image/
+# floor-plan extraction -> spreadsheet), repeatedly, with verified-correct
+# output — not a guess, and not the same claim as "hasn't hit the hard
+# 300-page ceiling yet". The largest real file exercised through the full
+# pipeline so far: Crown Estate, 20 pages / ~4.3MB. TESTED_MAX_PDF_BYTES
+# sits a little above that exact figure so the known-good reference file
+# itself doesn't spuriously trigger this. A file beyond these thresholds
+# (but still under MAX_PDF_PAGES) is a soft *warning*, not an error — it
+# may well process fine, page-by-page memory bounding (extraction/
+# pdf_images.py) doesn't stop applying just because a file is bigger than
+# what's been tested — this only tells whoever's running the batch that
+# this exact size combination hasn't been specifically verified yet.
+TESTED_MAX_PDF_PAGES = 20
+TESTED_MAX_PDF_BYTES = 4.5 * 1024 * 1024
 
 
 def _read_pdf(path):
@@ -133,11 +158,25 @@ def _read_pdf(path):
     text = "\n".join(text_parts).strip()
     if not text and not tables:
         raise ValueError("No extractable text found in PDF (it may be a scanned image)")
+
+    page_count = len(text_parts)
+    try:
+        size_bytes = Path(path).stat().st_size
+    except OSError:
+        size_bytes = 0
+    size_warning = None
+    if page_count > TESTED_MAX_PDF_PAGES or size_bytes > TESTED_MAX_PDF_BYTES:
+        size_warning = (
+            f"This PDF ({page_count} pages, {size_bytes / 1024 / 1024:.1f}MB) is larger than what's "
+            f"been fully tested end-to-end (~{TESTED_MAX_PDF_PAGES} pages / ~4MB) — it may well process "
+            "fine, it just hasn't been specifically verified at this size yet."
+        )
+
     # Per-page text (not just the joined whole), so a downstream Floor
     # Plan/High Res Images enrichment step can tell which of the source
     # PDF's own pages a given extracted listing actually came from — see
     # extraction.pdf_images.find_matching_pages.
-    return _empty(text=text, tables=tables, file_date=file_date, pages_text=text_parts)
+    return _empty(text=text, tables=tables, file_date=file_date, pages_text=text_parts, size_warning=size_warning)
 
 
 def _read_docx(path):
