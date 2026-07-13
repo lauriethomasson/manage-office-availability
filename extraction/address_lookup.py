@@ -39,16 +39,31 @@ _cache = None
 
 # Confirmed (2026-07) that grounding_metadata.grounding_chunks can come back
 # completely empty on one call and populated on the next, for the exact same
-# building/provider query — see the flakiness note in _search below. That
-# case is retried on a future run rather than cached as a permanent
-# rejection, but retrying forever on a building that's *consistently* flaky
-# would quietly burn through the 20/day free-tier quota one call at a time,
-# every time it's reprocessed. This caps it: after this many empty-metadata
-# misses (across separate runs, not retried within a single run), give up
-# and cache a final rejection like any other confident "not found" — same
-# worst-case cost as the old behavior, just delayed enough to give a normal
-# flaky miss a couple of chances to resolve itself first.
+# building/provider query — see the flakiness note in _search below. Two
+# layers of retry handle this: _search itself immediately retries up to
+# MAX_EMPTY_METADATA_RETRIES times within a single find_address() call
+# (confirmed on real Render logs that the underlying search is usually
+# already finding the correct address — City Tower -> 40 Basinghall Street,
+# Elsley -> 20/30 Great Titchfield Street W1W 8BF, Kent House -> 17 Market
+# Place W1W 8AJ, all genuinely correct — it's specifically the metadata
+# that's sometimes missing, not the search itself), so most cases resolve
+# within the same run rather than needing several separate future runs.
+# This constant is the second, cross-run layer for the rarer case where
+# even that immediate retry is still flaky: retrying forever on a building
+# that's *consistently* flaky across many separate runs would quietly burn
+# through the 20/day free-tier quota one call at a time, every time it's
+# reprocessed. This caps it: after this many empty-metadata misses (each a
+# full MAX_EMPTY_METADATA_RETRIES-attempt run, not a single call), give up
+# and cache a final rejection like any other confident "not found".
 MAX_EMPTY_METADATA_MISSES = 3
+
+# How many times _search retries immediately (within one find_address()
+# call, no cross-run persistence needed) when a confident answer comes
+# back with completely empty grounding metadata — see the flakiness note
+# there. Real API calls, so bounded rather than unlimited; 3 in practice
+# resolves this most of the time given how often the very next attempt
+# for the same query comes back with real citations.
+MAX_EMPTY_METADATA_RETRIES = 3
 
 
 def find_address(building_name, provider_name=None, context_hint="a commercial office building in London, UK"):
@@ -144,7 +159,17 @@ def _search(building_name, provider_name, context_hint):
     or a deliberate rejection) worth remembering. quota_exhausted is True
     only for the specific 429/RESOURCE_EXHAUSTED case, never for any
     other kind of failure (network, no key, no chunks) — see
-    extraction.quota.is_quota_exceeded."""
+    extraction.quota.is_quota_exceeded.
+
+    Retries immediately, within this single call, up to
+    MAX_EMPTY_METADATA_RETRIES times when a confident answer comes back
+    with completely empty grounding metadata (see the flakiness note
+    below) — confirmed on real Render logs that the search itself is
+    usually already correct in this case, it's specifically the metadata
+    that's sometimes missing, so a fresh attempt right away resolves it
+    far more often than not. Only returns flaky=True (letting
+    find_address's own cross-run miss-counter take over) once every
+    retry within this call has also come back with no metadata."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None, [], False, False, False
@@ -170,69 +195,87 @@ def _search(building_name, provider_name, context_hint):
         f'building, return exactly {NOT_FOUND} and nothing else.'
     )
 
-    try:
-        client = genai.Client(api_key=api_key, vertexai=False)
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            # No thinking_config here — gemini-2.5-flash rejects
-            # thinking_level (that param is for the newer 3.x models used
-            # elsewhere in this repo); this model's defaults are fine for
-            # a short lookup like this.
-            config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())]),
-        )
-    except Exception as e:
-        # A quota error (429), a network failure, etc. — not a real
-        # answer, so not cacheable; the caller should be free to retry
-        # this exact building/provider pair again next time.
-        print(f"[address_lookup] web search failed for '{building_name}': {type(e).__name__}: {e}")
-        return None, [], False, False, quota.is_quota_exceeded(e)
+    client = genai.Client(api_key=api_key, vertexai=False)
 
-    text = (response.text or "").strip()
-    if not text or text.upper().startswith(NOT_FOUND):
-        return None, [], True, False, False
-
-    # Guard against the model adding anything beyond the single line asked
-    # for despite instructions.
-    address = text.splitlines()[0].strip().strip('"')
-    sources, grounded = _extract_sources(response)
-
-    if len(sources) < MIN_INDEPENDENT_SOURCES:
-        if not grounded:
-            # Confirmed empirically (2026-07): the same query, called
-            # again moments later, can come back with an identical
-            # confident address in response.text but with
-            # grounding_metadata.grounding_chunks entirely empty/None —
-            # even though an earlier call for the exact same building
-            # returned real, distinct cited chunks. This is API-side
-            # flakiness in whether grounding metadata is populated, not
-            # evidence the answer is actually unsupported. Treating it as
-            # a deliberate "not enough sources" rejection previously
-            # marked this cacheable — which permanently poisoned the
-            # cache for this building/provider pair (find_address()
-            # checks the cache before ever calling the API again), so one
-            # unlucky call blocked it forever, even past a quota reset.
-            # Not cacheable here: let a future run retry instead.
-            print(
-                f"[address_lookup] '{building_name}' -> '{address}' but grounding "
-                f"metadata had no chunks at all this call (likely API flakiness, not "
-                f"a real rejection) — not caching, will retry on a future run"
+    for attempt in range(1, MAX_EMPTY_METADATA_RETRIES + 1):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                # No thinking_config here — gemini-2.5-flash rejects
+                # thinking_level (that param is for the newer 3.x models used
+                # elsewhere in this repo); this model's defaults are fine for
+                # a short lookup like this.
+                config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())]),
             )
-            return None, [], False, True, False
-        # At least one real chunk came back, just fewer than required — a
-        # single thin source is exactly the failure mode that produced
-        # three confirmed wrong addresses (Porters Place, Elsley, Kent
-        # House) before this check existed — don't accept it just because
-        # the model sounded confident. Still a real, cacheable outcome
-        # (not a transient error) — the caller falls back to the bare-name
-        # Nominatim tier from here.
-        print(
-            f"[address_lookup] rejecting '{address}' for '{building_name}' — only "
-            f"{len(sources)} independent source(s) cited (need >= {MIN_INDEPENDENT_SOURCES}): {sources}"
-        )
-        return None, sources, True, False, False
+        except Exception as e:
+            # A quota error (429), a network failure, etc. — not a real
+            # answer, so not cacheable; the caller should be free to retry
+            # this exact building/provider pair again next time. Not
+            # retried immediately like the empty-metadata case below —
+            # a quota error in particular will just fail identically on
+            # every immediate retry, wasting calls for nothing.
+            print(f"[address_lookup] web search failed for '{building_name}': {type(e).__name__}: {e}")
+            return None, [], False, False, quota.is_quota_exceeded(e)
 
-    return address, sources, True, False, False
+        text = (response.text or "").strip()
+        if not text or text.upper().startswith(NOT_FOUND):
+            return None, [], True, False, False
+
+        # Guard against the model adding anything beyond the single line
+        # asked for despite instructions.
+        address = text.splitlines()[0].strip().strip('"')
+        sources, grounded = _extract_sources(response)
+
+        if len(sources) >= MIN_INDEPENDENT_SOURCES:
+            return address, sources, True, False, False
+
+        if grounded:
+            # At least one real chunk came back, just fewer than required
+            # — a single thin source is exactly the failure mode that
+            # produced three confirmed wrong addresses (Porters Place,
+            # Elsley, Kent House) before this check existed — don't accept
+            # it just because the model sounded confident. Still a real,
+            # cacheable outcome (not a transient error) — the caller falls
+            # back to the bare-name Nominatim tier from here. Not retried
+            # — this isn't the empty-metadata flakiness case, the model
+            # gave a genuine (if too-thin) answer.
+            print(
+                f"[address_lookup] rejecting '{address}' for '{building_name}' — only "
+                f"{len(sources)} independent source(s) cited (need >= {MIN_INDEPENDENT_SOURCES}): {sources}"
+            )
+            return None, sources, True, False, False
+
+        # Confirmed empirically (2026-07): the same query, called again
+        # moments later, can come back with an identical confident address
+        # in response.text but with grounding_metadata.grounding_chunks
+        # entirely empty/None — even though an earlier call for the exact
+        # same building returned real, distinct cited chunks, and Render
+        # logs have since confirmed the address itself was correct all
+        # along (City Tower -> 40 Basinghall Street, Elsley -> 20/30 Great
+        # Titchfield Street W1W 8BF, Kent House -> 17 Market Place W1W
+        # 8AJ). This is API-side flakiness in whether grounding metadata
+        # is populated, not evidence the answer is unsupported — retry
+        # immediately rather than giving up on the first flaky response.
+        if attempt < MAX_EMPTY_METADATA_RETRIES:
+            print(
+                f"[address_lookup] '{building_name}' -> '{address}' but grounding metadata had "
+                f"no chunks at all (attempt {attempt}/{MAX_EMPTY_METADATA_RETRIES}) — retrying immediately"
+            )
+            continue
+
+    # Every immediate retry came back with empty metadata too — treating a
+    # deliberate "not enough sources" rejection as cacheable here would
+    # permanently poison the cache for this building/provider pair
+    # (find_address() checks the cache before ever calling the API again),
+    # so one unlucky run blocked it forever, even past a quota reset. Not
+    # cacheable here: let find_address's own cross-run miss-counter (and,
+    # eventually, a future run) retry instead.
+    print(
+        f"[address_lookup] '{building_name}' still had no grounding chunks after "
+        f"{MAX_EMPTY_METADATA_RETRIES} immediate attempts — not caching, will retry on a future run"
+    )
+    return None, [], False, True, False
 
 
 def _extract_sources(response):

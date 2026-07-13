@@ -16,7 +16,7 @@ from flask import Flask, Response, abort, jsonify, render_template, request, sen
 load_dotenv()
 
 import storage
-from extraction import pdf_images
+from extraction import address_lookup, geocode as geocode_module, pdf_images
 from extraction.naming import make_unique_names
 from extraction.pipeline import process_files
 from spreadsheet import write_xlsx
@@ -203,6 +203,17 @@ def process():
         for r, path in zip(processed_results, saved_paths):
             r["_source_path"] = path
         results = processed_results + unsupported_results
+
+        # Mirroring the geocode/address-lookup on-disk caches to B2/S3 used
+        # to happen synchronously inside process_files itself — confirmed
+        # via Render's own logs that a worker was once killed while stuck
+        # inside exactly that call (a real network round-trip that can run
+        # long), which a generic SIGKILL then gets misreported as "Perhaps
+        # out of memory?" regardless of the real cause. Backgrounded here,
+        # unconditionally (each flush_to_storage is already a cheap no-op
+        # if nothing was cached this run, or if storage isn't configured
+        # at all), same as every other storage.upload call below.
+        threading.Thread(target=_flush_caches, daemon=True).start()
 
         # (storage_key, local_path) pairs, uploaded together in one
         # background thread after the response is built rather than
@@ -498,6 +509,20 @@ def _upload_all(jobs):
     storage.upload itself) doesn't stop the rest."""
     for key, path in jobs:
         storage.upload(key, path)
+
+
+def _flush_caches():
+    """Runs in a background thread (see process() above), mirroring the
+    geocode/address-lookup on-disk caches to B2/S3 once per batch — used
+    to run synchronously inside extraction.pipeline.process_files itself.
+    Confirmed via Render's own logs that a worker was once killed while
+    stuck inside exactly that call; a generic SIGKILL gets reported as
+    "Perhaps out of memory?" regardless of whether the real cause was
+    memory or a slow/hanging network call, so this had been silently
+    contributing to that same symptom. Each flush_to_storage is already a
+    no-op if nothing was cached this run or storage isn't configured."""
+    address_lookup.flush_to_storage()
+    geocode_module.flush_to_storage()
 
 
 @app.route("/api/download/<batch_id>/<path:filename>")

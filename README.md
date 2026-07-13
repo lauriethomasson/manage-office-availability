@@ -216,6 +216,22 @@ compatibility (matching the "Loader" sheet of
   "20/day" figure appearing in several comments as *context* for why
   quota exhaustion happens easily, not as anything actually tracked.
 
+  Tier 2 itself retries immediately (up to `MAX_EMPTY_METADATA_RETRIES`,
+  currently 3, real API calls within the same lookup) when Gemini's
+  grounding call comes back with a confident, correct-looking address but
+  completely empty `grounding_chunks` metadata — confirmed via real
+  Render logs (2026-07) that the search itself was consistently correct
+  (City Tower → 40 Basinghall Street, Elsley → 20/30 Great Titchfield
+  Street W1W 8BF, Kent House → 17 Market Place W1W 8AJ) but the metadata
+  needed to pass the `MIN_INDEPENDENT_SOURCES` check was sometimes just
+  missing from that specific call, not evidence the answer was wrong.
+  Before this, one flaky call would fall all the way through to tier 3's
+  own coincidental-match risk and silently re-poison the result, even
+  though the correct answer was one retry away. Only falls through to
+  `address_lookup.py`'s own cross-run "flaky" miss-counter (see
+  `MAX_EMPTY_METADATA_MISSES`) if every retry within this call is also
+  empty.
+
   Tier 3's own result is never trusted from cache (`extraction/geocode.py`'s
   `geocode(..., confident=False)`) — confirmed (2026-07) that testing GPE
   while Gemini's grounding quota was exhausted made tier 2 fail every
@@ -402,16 +418,31 @@ regardless, so nothing here is meant to persist long-term.
   PDF (Crown Estate, 4.3MB/20 pages) got the worker SIGKILLed for
   exceeding this. `extraction/pdf_images.py`'s embedded-image extraction
   now decodes at most one page's images at a time (`scan_pages` +
-  `load_page_images`) instead of holding every real image in the whole
-  document in memory at once, and `extraction/file_readers.py` rejects a
-  PDF over `MAX_PDF_PAGES` (300) up front with a clear per-file error
-  instead of attempting it. The Procfile/`render.yaml` startCommand also
-  adds `--max-requests 40 --max-requests-jitter 10`: this app runs a
-  single long-lived gunicorn worker, and native C extensions (PyMuPDF,
-  Pillow) don't reliably return freed memory to the OS, so RSS can
-  ratchet upward across a session's worth of requests even when each
-  individual file is well-behaved on its own — periodically recycling the
-  worker resets that accumulation.
+  `load_page_images`, also explicitly shrinking PyMuPDF's own
+  process-global object store after each call — not something Python's
+  own garbage collector touches) instead of holding every real image in
+  the whole document in memory at once, and `extraction/file_readers.py`
+  rejects a PDF over `MAX_PDF_PAGES` (300) up front with a clear per-file
+  error instead of attempting it. The Procfile/`render.yaml` startCommand
+  also adds `--max-requests 15 --max-requests-jitter 5`: this app runs a
+  single long-lived gunicorn worker, and native/heavy dependencies
+  (PyMuPDF, Pillow, `google-genai` — confirmed importing the latter alone
+  costs ~53MB, permanently, the first time either Gemini call site is
+  used in a worker's lifetime) don't reliably return freed memory to the
+  OS, so RSS can ratchet upward across a session's worth of requests even
+  when each individual file is well-behaved on its own — periodically
+  recycling the worker resets that accumulation.
+
+  Also confirmed (2026-07) that at least one "Perhaps out of memory?"
+  SIGKILL actually caught a worker stuck inside `storage.upload()` —
+  mirroring the geocode/address-lookup caches to B2/S3 used to happen
+  *synchronously* inside `extraction.pipeline.process_files`, so a slow
+  or hanging B2 call could itself run long enough to look identical to an
+  OOM kill (gunicorn/Render report a generic SIGKILL message regardless
+  of the real cause). Moved to the same background-thread pattern
+  `app.py` already used for every other `storage.upload` call (see
+  `app.py`'s `_flush_caches`) so it can never block the HTTP response or
+  contribute to a worker timeout.
 
 ### Persistent storage (optional)
 
