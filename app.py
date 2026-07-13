@@ -499,7 +499,7 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
         if len(indices) == 1:
             matching_pages = [p for p in pdf_images.find_matching_pages(building, pages_text) if p in page_hashes]
             for p in matching_pages:
-                records_by_page[p].append((indices[0], building))
+                records_by_page[p].append((indices[0], building, records[indices[0]].get("Floor/Unit") or ""))
             continue
         # Several records share this exact text — find_all_matching_pages
         # (the union across every candidate tier), not find_matching_pages
@@ -518,7 +518,8 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
             for _ in range(occurrence_counts.get(p, 0)):
                 if not remaining:
                     break
-                records_by_page[p].append((remaining.pop(0), building))
+                idx = remaining.pop(0)
+                records_by_page[p].append((idx, building, records[idx].get("Floor/Unit") or ""))
 
     images_by_record = pdf_images.match_listings_to_images(source_path, page_hashes, records_by_page)
     for i, record in enumerate(records):

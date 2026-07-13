@@ -278,9 +278,11 @@ def match_listings_to_images(path, page_hashes, records_by_page):
 
     page_hashes: {page_num: [hash, ...]} from scan_pages — the real,
     non-boilerplate images already known for each page.
-    records_by_page: {page_num: [(record_index, building_name), ...]} in
-    original extraction order, for records whose find_matching_pages()
-    result included that page.
+    records_by_page: {page_num: [(record_index, building_name, floor_unit), ...]}
+    in original extraction order, for records whose find_matching_pages()
+    result included that page. floor_unit is that record's own extracted
+    "Floor/Unit" value (may be "" if unknown) — see step 2 below for why
+    this is needed alongside building_name.
 
     Returns {record_index: [(page_num, image_bytes, ext, floorplan_url), ...]}
     — page_num included (not just implied by the records_by_page key the
@@ -293,15 +295,28 @@ def match_listings_to_images(path, page_hashes, records_by_page):
     Algorithm, per page: locate each candidate listing's own heading text
     block (matching _building_candidates the same way find_matching_pages
     does, consuming text blocks in top-to-bottom/left-to-right reading
-    order so two records sharing byte-identical heading text — e.g. two
-    floors of the same building — each still get their own distinct
-    occurrence on the page, not both mapped to the first one found); then
-    assign each real image to the nearest heading directly above it
-    that horizontally overlaps its own column — the same heading a human
-    reader would associate that image with, not just "some heading
-    somewhere on this page." A page with only one listing degenerates to
-    the old whole-page behavior automatically, since there's only one
-    heading for every image to be nearest to."""
+    order); then assign each real image to the nearest heading directly
+    above it that horizontally overlaps its own column — the same
+    heading a human reader would associate that image with, not just
+    "some heading somewhere on this page." A page with only one listing
+    degenerates to the old whole-page behavior automatically, since
+    there's only one heading for every image to be nearest to.
+
+    When two or more pending records share byte-identical heading text
+    (e.g. two floors of the same building repeat on one page), reading
+    order alone doesn't reliably say which LLM-extracted record a given
+    occurrence belongs to — confirmed empirically wrong (Crown Estate,
+    2026-07): "215-221 Regent Street"'s "3rd Floor South" occurrence sits
+    ABOVE its "5th Floor" occurrence on the page, but the LLM's own
+    listings array extracted "5th Floor" first — assuming record order
+    matches page reading order paired every image with the wrong floor.
+    _floor_label_near reads the page's own "Floor | <value>" text printed
+    next to each heading occurrence and matches it against each
+    candidate record's own floor_unit to disambiguate; falls back to
+    reading order (the previous behavior) only when that comes back
+    inconclusive, so this is a pure accuracy improvement over the
+    single-occurrence and order-agrees-with-layout cases, which were
+    already correct."""
     try:
         import fitz
     except ImportError:
@@ -346,7 +361,11 @@ def match_listings_to_images(path, page_hashes, records_by_page):
             # 2. Each listing's own heading block, consumed in reading
             # order so repeated identical headings (e.g. two floors of
             # "Princes House, 38 Jermyn Street") each claim a distinct
-            # occurrence rather than all matching the first one found.
+            # occurrence rather than all matching the first one found —
+            # disambiguated by floor text (see _floor_label_near) when
+            # more than one pending record shares this heading's building
+            # name, since reading order alone isn't reliable there (see
+            # this function's own docstring).
             text_blocks = sorted(
                 (b for b in page.get_text("blocks") if (b[4] or "").strip()),
                 key=lambda b: (round(b[1] / 10) * 10, b[0]),
@@ -357,11 +376,25 @@ def match_listings_to_images(path, page_hashes, records_by_page):
                 if not pending:
                     break
                 lowered = text.lower()
-                for i, (record_index, building_name) in enumerate(pending):
-                    if any(c in lowered for c in _building_candidates(building_name)):
-                        headings.append((record_index, (x0, y0, x1, y1)))
-                        pending.pop(i)
-                        break
+                matches = [
+                    i
+                    for i, (record_index, building_name, floor_unit) in enumerate(pending)
+                    if any(c in lowered for c in _building_candidates(building_name))
+                ]
+                if not matches:
+                    continue
+                chosen = matches[0]
+                if len(matches) > 1:
+                    floor_label = _floor_label_near(text_blocks, (x0, y0, x1, y1))
+                    if floor_label:
+                        floor_label_lower = floor_label.lower()
+                        floor_matches = [
+                            i for i in matches if pending[i][2] and pending[i][2].lower() in floor_label_lower
+                        ]
+                        if len(floor_matches) == 1:
+                            chosen = floor_matches[0]
+                record_index, _building_name, _floor_unit = pending.pop(chosen)
+                headings.append((record_index, (x0, y0, x1, y1)))
             if not headings:
                 continue
 
@@ -513,6 +546,33 @@ def count_heading_occurrences(path, page_nums, building_name):
             pass
 
     return counts
+
+
+def _floor_label_near(text_blocks, heading_rect, max_dy=200):
+    """Finds the "Floor | <value>" text block (as printed directly on the
+    page, e.g. "Floor | 3rd Floor South") associated with a specific
+    heading occurrence at heading_rect, for disambiguating which pending
+    record a repeated heading belongs to (see match_listings_to_images).
+
+    These documents print a listing's own Floor sub-field either directly
+    below its heading at the same x position, or to the right of it at
+    roughly the same y (both layouts seen in the Crown Estate example) —
+    so this picks whichever "Floor"-prefixed block is closest by a
+    distance that tolerates either, among blocks not positioned above or
+    well to the left of the heading (which would belong to a different
+    listing's column instead)."""
+    hx0, hy0, _hx1, _hy1 = heading_rect
+    best_text, best_dist = None, None
+    for x0, y0, _x1, _y1, text, *_rest in text_blocks:
+        stripped = (text or "").strip()
+        if not stripped.lower().startswith("floor"):
+            continue
+        if y0 < hy0 - 5 or y0 - hy0 > max_dy or x0 < hx0 - 5:
+            continue
+        dist = (y0 - hy0) + max(0, x0 - hx0) * 0.1
+        if best_dist is None or dist < best_dist:
+            best_dist, best_text = dist, stripped
+    return best_text
 
 
 def _building_candidates(building_name):
