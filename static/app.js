@@ -7,6 +7,25 @@ const resultsEl = document.getElementById("results");
 
 let selectedFiles = [];
 
+// Shown for any failure that isn't a clean per-file error from the server
+// (server crash/500, gateway timeout page, malformed/non-JSON response,
+// etc.) — deliberately generic so we never leak a raw parse error, stack
+// trace, or HTML page into the UI.
+const GENERIC_ERROR_MESSAGE =
+  "Something went wrong while processing your file(s). This can happen with very large files, " +
+  "network issues, or a temporary server problem. Please try again — if it keeps happening, let us know.";
+
+// Shown specifically when fetch() itself throws, which only happens when
+// there was no HTTP response at all (offline, DNS failure, connection
+// reset) — distinct from the server responding with an error.
+const NETWORK_ERROR_MESSAGE =
+  "Couldn't reach the server — check your internet connection and try again.";
+
+function setStatus(text, isError) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle("error", !!isError);
+}
+
 dropzone.addEventListener("click", () => fileInput.click());
 dropzone.addEventListener("dragover", (e) => {
   e.preventDefault();
@@ -61,26 +80,55 @@ processBtn.addEventListener("click", async () => {
   selectedFiles.forEach((f) => formData.append("files", f));
 
   processBtn.disabled = true;
-  statusEl.textContent = `Processing ${selectedFiles.length} file(s)…`;
+  setStatus(`Processing ${selectedFiles.length} file(s)…`, false);
   resultsEl.innerHTML = "";
 
   try {
-    const res = await fetch("/api/process", {
-      method: "POST",
-      body: formData,
-      headers: { "X-Access-Token": window.ACCESS_TOKEN || "" },
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      statusEl.textContent = `Error: ${data.error || "processing failed"}`;
+    let res;
+    try {
+      res = await fetch("/api/process", {
+        method: "POST",
+        body: formData,
+        headers: { "X-Access-Token": window.ACCESS_TOKEN || "" },
+      });
+    } catch (err) {
+      // fetch() only rejects when no HTTP response was received at all
+      // (offline, DNS failure, connection reset mid-request) — the server
+      // never got a chance to reply, so this is a connection problem, not
+      // a server-side one.
+      setStatus(NETWORK_ERROR_MESSAGE, true);
       return;
     }
-    statusEl.textContent = "Done.";
+
+    let rawText;
+    try {
+      rawText = await res.text();
+    } catch (err) {
+      // The connection dropped while the response body was streaming in.
+      setStatus(NETWORK_ERROR_MESSAGE, true);
+      return;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (err) {
+      // Server returned something that isn't JSON at all — a crashed-worker
+      // HTML page, a proxy/gateway timeout page, an empty body, etc. Never
+      // surface that raw HTML or the parse error itself to the user.
+      setStatus(GENERIC_ERROR_MESSAGE, true);
+      return;
+    }
+
+    if (!res.ok) {
+      setStatus(data && data.error ? `Error: ${data.error}` : GENERIC_ERROR_MESSAGE, true);
+      return;
+    }
+
+    setStatus("Done.", false);
     renderResults(data);
     selectedFiles = [];
     renderFileList();
-  } catch (err) {
-    statusEl.textContent = `Error: ${err.message}`;
   } finally {
     processBtn.disabled = selectedFiles.length === 0;
   }

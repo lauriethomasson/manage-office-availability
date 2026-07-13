@@ -45,6 +45,7 @@ button#processBtn {
 button#processBtn:disabled { background: #2a2d36; color: #6b7280; cursor: not-allowed; }
 
 .status { font-size: 13px; color: #9aa0a6; min-height: 18px; }
+.status.error { color: #ff8a8a; }
 
 .results { margin-top: 16px; }
 .results table { width: 100%; border-collapse: collapse; font-size: 13px; }
