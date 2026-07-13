@@ -64,8 +64,8 @@ def _rect_overlap_fraction(a, b):
 
 
 def _link_uri_for_rect(links, rect):
-    """Returns the URI of whichever of a page's own link annotations
-    overlaps `rect` the most (above _LINK_OVERLAP_THRESHOLD), or None.
+    """Returns the URI of a page's own link annotation covering `rect`
+    (above _LINK_OVERLAP_THRESHOLD), or None.
 
     Confirmed empirically (Crown Estate, 2026-07) that each real
     per-listing image on a page can carry its own link annotation
@@ -76,17 +76,29 @@ def _link_uri_for_rect(links, rect):
     embedded bytes at all, so extraction.pdf_images.is_floorplan_image's
     pixel-based check can never see it. Confirmed distinct per image
     (not one shared link for a whole page): each listing's own image had
-    its own distinct tour ID."""
-    best_uri, best_overlap = None, 0.0
+    its own distinct tour ID.
+
+    When more than one link annotation qualifies for the same image
+    (confirmed empirically on "5 Swallow Place, 3rd Floor Suite 3.1":
+    two overlapping link boxes on the same photo, one tightly fit to it
+    pointing to a stale/superseded tour ID, one looser but pointing to
+    the actual current tour — verified by directly opening both), this
+    takes whichever qualifying link appears LAST in the page's own
+    annotation list, not whichever has the tightest geometric fit. PDF
+    annotations are appended in edit order, so a later annotation is
+    more likely to be a correction layered on top of an older one left
+    in place, rather than a tighter pixel fit necessarily being the
+    intended link."""
+    best_uri = None
     for link in links:
         uri = link.get("uri")
         lrect = link.get("from")
         if not uri or lrect is None:
             continue
         overlap = _rect_overlap_fraction(rect, (lrect.x0, lrect.y0, lrect.x1, lrect.y1))
-        if overlap > best_overlap:
-            best_overlap, best_uri = overlap, uri
-    return best_uri if best_overlap > _LINK_OVERLAP_THRESHOLD else None
+        if overlap > _LINK_OVERLAP_THRESHOLD:
+            best_uri = uri
+    return best_uri
 
 
 def scan_pages(path):
