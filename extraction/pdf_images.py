@@ -193,6 +193,128 @@ def extract_page_images(path):
     return {page_num: load_page_images(path, page_num, hashes) for page_num, hashes in page_hashes.items()}
 
 
+def match_listings_to_images(path, page_hashes, records_by_page):
+    """Pairs each real image on a page to the SPECIFIC listing it belongs
+    to, by position — not to every record whose building name happens to
+    appear anywhere on that page.
+
+    Confirmed necessary empirically (Crown Estate, 2026-07): this
+    source's pages routinely hold 2-6 distinct listings sharing one page
+    (a 2-column or 3-column grid), each with its own real photos. The
+    previous approach — find every page a building's name appears on,
+    then attach every real image found on that whole page — silently
+    merged unrelated buildings' photos into one shared gallery (e.g. "7
+    Swallow Place" and "Charles House, 5-11 Regent Street", genuinely
+    different buildings sharing a page, ending up with the identical
+    photo set) whenever a page held more than one listing.
+
+    page_hashes: {page_num: [hash, ...]} from scan_pages — the real,
+    non-boilerplate images already known for each page.
+    records_by_page: {page_num: [(record_index, building_name), ...]} in
+    original extraction order, for records whose find_matching_pages()
+    result included that page.
+
+    Returns {record_index: [(page_num, image_bytes, ext), ...]} — page_num
+    included (not just implied by the records_by_page key the caller
+    already has) so a caller can still tell which source page a given
+    image came from, e.g. for is_floorplan_page's own per-page text check.
+
+    Algorithm, per page: locate each candidate listing's own heading text
+    block (matching _building_candidates the same way find_matching_pages
+    does, consuming text blocks in top-to-bottom/left-to-right reading
+    order so two records sharing byte-identical heading text — e.g. two
+    floors of the same building — each still get their own distinct
+    occurrence on the page, not both mapped to the first one found); then
+    assign each real image to the nearest heading directly above it
+    that horizontally overlaps its own column — the same heading a human
+    reader would associate that image with, not just "some heading
+    somewhere on this page." A page with only one listing degenerates to
+    the old whole-page behavior automatically, since there's only one
+    heading for every image to be nearest to."""
+    try:
+        import fitz
+    except ImportError:
+        return {}
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return {}
+
+    result = {}
+    try:
+        for page_num, record_entries in records_by_page.items():
+            if page_num < 0 or page_num >= len(doc) or not record_entries:
+                continue
+            allowed = set(page_hashes.get(page_num, []))
+            if not allowed:
+                continue
+            page = doc[page_num]
+
+            # 1. Each real image's own position(s) + hash on this page.
+            image_positions = []  # (bbox, image_bytes, ext)
+            for img in page.get_images(full=True):
+                xref = img[0]
+                try:
+                    base = doc.extract_image(xref)
+                except Exception:
+                    continue
+                data = base.get("image")
+                if not data or len(data) < MIN_IMAGE_BYTES:
+                    continue
+                h = hashlib.sha256(data).hexdigest()
+                if h not in allowed:
+                    continue
+                ext = base.get("ext", "png")
+                for rect in page.get_image_rects(xref):
+                    image_positions.append((rect, data, ext))
+            if not image_positions:
+                continue
+
+            # 2. Each listing's own heading block, consumed in reading
+            # order so repeated identical headings (e.g. two floors of
+            # "Princes House, 38 Jermyn Street") each claim a distinct
+            # occurrence rather than all matching the first one found.
+            text_blocks = sorted(
+                (b for b in page.get_text("blocks") if (b[4] or "").strip()),
+                key=lambda b: (round(b[1] / 10) * 10, b[0]),
+            )
+            pending = list(record_entries)
+            headings = []  # (record_index, (x0, y0, x1, y1))
+            for x0, y0, x1, y1, text, *_rest in text_blocks:
+                if not pending:
+                    break
+                lowered = text.lower()
+                for i, (record_index, building_name) in enumerate(pending):
+                    if any(c in lowered for c in _building_candidates(building_name)):
+                        headings.append((record_index, (x0, y0, x1, y1)))
+                        pending.pop(i)
+                        break
+            if not headings:
+                continue
+
+            # 3. Each real image -> nearest heading above it, in the same
+            # horizontal band (x-overlap), not just anywhere on the page.
+            for (ix0, iy0, ix1, iy1), data, ext in image_positions:
+                best_index, best_y1 = None, None
+                for record_index, (hx0, hy0, hx1, hy1) in headings:
+                    overlaps_x = hx0 < ix1 and hx1 > ix0
+                    if not overlaps_x or hy1 > iy0:
+                        continue
+                    if best_y1 is None or hy1 > best_y1:
+                        best_y1, best_index = hy1, record_index
+                if best_index is not None:
+                    result.setdefault(best_index, []).append((page_num, data, ext))
+    finally:
+        doc.close()
+        try:
+            # See load_page_images' own finally block for why this is here.
+            fitz.TOOLS.store_shrink(100)
+        except Exception:
+            pass
+
+    return result
+
+
 _FLOORPLAN_TEXT_RE = re.compile(r"floor[\s-]?plan", re.IGNORECASE)
 
 
@@ -230,21 +352,36 @@ def find_matching_pages(building_name, pages_text):
     A building name that's mostly numeric (e.g. "1 Vine Street") has no
     useful (3), so it relies on (1)/(2) instead — already confirmed
     working for those via the full-string match."""
+    for candidate in _building_candidates(building_name):
+        if not pages_text:
+            continue
+        matches = [i for i, text in enumerate(pages_text) if candidate in (text or "").lower()]
+        if matches:
+            return matches
+    return []
+
+
+def _building_candidates(building_name):
+    """Shared with match_listings_to_images below: the same three
+    name-matching tiers as find_matching_pages' own docstring, lowercased
+    and de-duplicated, in priority order — the *name* portion of a
+    building string, not the street-address portion (contrast
+    extraction.pipeline's own comma-split, which wants the opposite half
+    for geocoding)."""
     candidates = [building_name or ""]
     if "," in (building_name or ""):
         candidates.append(building_name.split(",", 1)[0])
     m = _LEADING_NAME_RE.match(building_name or "")
     if m and m.group(1).strip():
         candidates.append(m.group(1))
-
-    for candidate in candidates:
-        name = candidate.strip().lower()
-        if not name or not pages_text:
-            continue
-        matches = [i for i, text in enumerate(pages_text) if name in (text or "").lower()]
-        if matches:
-            return matches
-    return []
+    seen = set()
+    result = []
+    for c in candidates:
+        name = c.strip().lower()
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
 
 
 def is_floorplan_page(page_text):

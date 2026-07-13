@@ -120,14 +120,35 @@ parser added to `extraction/rules/`.
    (`extraction/rules/knotel.py`). For a PDF source with no rule-based
    parser (LLM fallback — e.g. BC, Crown Estate), `extraction/pdf_images.py`
    extracts the source PDF's own embedded images (excluding
-   logos/banners repeated across many pages), matches a listing's
-   Building name to the PDF page it came from, and links High Res Images
-   to that real, extracted photo — served `inline` like a PDF, same
-   access-token/fallback-storage behavior as everything else here. Left
-   blank whenever a source has no embedded images at all, or a listing's
-   page can't be matched — never fabricated. Floor Plan is left alone for
-   these LLM-fallback PDFs (no validated way to tell a floor-plan diagram
-   apart from a building photo purely from image data).
+   logos/banners repeated across many pages) and classifies each one as a
+   floor-plan diagram or a real photo (`is_floorplan_page`'s source-labeled
+   text check, e.g. BC's own "Example Floorplan" heading, plus
+   `is_floorplan_image`'s pixel-content fallback — a floor plan's mostly-white
+   background versus a real photo's, confirmed empirically across several
+   sources). Confirmed on Crown Estate (2026-07) that a source can
+   legitimately have zero floor-plan images at all — every one of its 83
+   embedded images, across every section of the document, turned out to be
+   a real interior or exterior photograph when actually viewed; Floor Plan
+   staying blank for all of that source's rows is the correct outcome, not
+   a classifier bug, and there's nothing to fabricate a distinction from
+   when the source genuinely doesn't have one.
+
+   A page with more than one listing (routine on Crown Estate — a 2- or
+   3-column grid, several listings sharing one page) matches each real
+   image to the SPECIFIC listing it's positioned next to
+   (`match_listings_to_images`: each listing's own heading text block on
+   the page, then the nearest image above it in the same horizontal
+   column), not to every listing whose name happens to appear anywhere on
+   that page — confirmed this matters empirically: the earlier whole-page
+   attribution silently merged unrelated buildings' photos into one shared
+   gallery whenever a page held more than one listing. A single-record
+   document (e.g. BC's own single-listing brochure) skips this — every
+   real image in it belongs to that one record regardless of position, no
+   attribution risk with nothing else to confuse it with.
+
+   Either way, Floor Plan/High Res Images are left blank whenever a source
+   has no embedded images at all, or a listing's page/position can't be
+   matched — never fabricated.
 
    `/api/download` always tries local disk first (fast path — the batch
    that just ran). If the local copy is gone — Render's free-tier disk is
@@ -191,6 +212,51 @@ compatibility (matching the "Loader" sheet of
      "Thirty One Alfred Place" → "31 Alfred Place") — counts as a
      confident match (a full street address, just spelled out in words),
      not the bare-name case below.
+
+     An LLM-extracted `Building` combining a marketing name with its real
+     street address (e.g. "Princes House, 38 Jermyn Street", sometimes
+     with a trailing postal district too — "Princes House, 38 Jermyn
+     Street, SW1Y") isn't a bare name (it has a house number), but
+     confirmed empirically (Crown Estate, 2026-07) that Nominatim returns
+     NO MATCH AT ALL for the combined name+address string — even though
+     the address portion alone resolves correctly every time. When the
+     record's own text as given fails,
+     `extraction/pipeline._address_retry_candidates` retries, in order: a
+     bare trailing postal district (e.g. the "W1" in "5 Swallow Place,
+     W1") stripped entirely — never a query built from the code alone,
+     confirmed to resolve to a generic district-wide centroid shared by
+     every other building that also fell back to it; then the address
+     portion of a "Name, Address[, District]" string, with and without
+     its own trailing district code. The address is still fully present
+     in the source text either way, so a match found this way isn't
+     flagged as derived/"Not in source text" — just a query that needed
+     reshaping to be understood.
+
+     Multiple occurrences of the exact same building within one file
+     (e.g. several floors, each its own row) are also consolidated: if
+     one occurrence's own text happens to include a qualifier another
+     lacks (confirmed on Crown Estate: the same "1 Vine Street" listed
+     with ", W1" on one page and without it on another, since the source
+     itself doesn't repeat the qualifier in every section), every
+     occurrence is geocoded using whichever text is richest — a bare
+     version alone was confirmed to resolve confidently to a
+     coincidentally-real but wrong address (Walthamstow, ~12km from the
+     real Mayfair one) with no second Nominatim candidate for the
+     ambiguity check below to catch.
+
+     Finally, `extraction/geocode.py`'s own `_fetch` requests a few
+     candidate matches (not just the top one) and checks how far apart
+     they are: a common street name with no distinguishing context can
+     return a *confident-looking* top result that's actually many km away
+     in an unrelated borough (confirmed: "25 Bury Street" → Edmonton, N9,
+     ~15km from the real St James's one) — Nominatim itself doesn't flag
+     this. Candidates spanning more than a few km are treated as
+     unresolved rather than silently trusted (falls through the same as
+     "no match" — to a further tier, or to `"Needs manual lookup"` if none
+     is left) — verified this doesn't risk flagging a genuinely good match
+     just for returning more than one plausible *nearby* result: every
+     known-good address already in this app's own sources clusters within
+     a few hundred metres across its own top candidates.
   2. For a genuinely bare building name (no house number/street at all,
      spelled out or otherwise) — an actual web search for the building's
      real address, Gemini with Google Search grounding

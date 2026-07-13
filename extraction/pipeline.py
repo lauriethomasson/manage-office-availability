@@ -5,6 +5,7 @@ file gets its own result entry so one failure doesn't sink the batch.
 Unlike an earlier version of this module, each file's records stay
 separate (one output spreadsheet per source file, not one combined master).
 """
+import re
 from datetime import date
 
 from . import memlog, quota
@@ -16,6 +17,82 @@ from .llm_fallback import LLMExtractionError, extract_with_llm
 from .naming import extract_date, resolve_provider_name, resolve_source_date
 from .rules import try_rules
 from .schema import normalize_record
+
+# A trailing postal district/area code with no inward part (e.g. "W1",
+# "SW1Y", "EC2V") — short enough to be a district code, not a full street
+# address of its own. Used only to group the SAME building's multiple
+# occurrences within one file for _geocode_records' consolidation below,
+# never to build a query itself (extraction.geocode's own callers handle
+# that; appending a bare district code to a query was confirmed
+# empirically to be unreliable — sometimes helps, sometimes breaks an
+# otherwise-working match entirely).
+_TRAILING_DISTRICT_RE = re.compile(r",?\s*[A-Za-z]{1,2}\d[A-Za-z\d]?\s*$")
+
+# A comma-separated segment that's ENTIRELY just a bare postal district
+# (e.g. the "W1" in "5 Swallow Place, W1") — as opposed to a real street
+# address (e.g. the "38 Jermyn Street" in "Princes House, 38 Jermyn
+# Street"). Used to tell apart the two different reasons a Building
+# string can contain a comma when retrying a failed geocode query below.
+_BARE_DISTRICT_RE = re.compile(r"^[A-Za-z]{1,2}\d[A-Za-z\d]?$")
+
+
+def _normalize_building_for_grouping(building):
+    stripped = _TRAILING_DISTRICT_RE.sub("", building or "").strip().rstrip(",").strip()
+    return stripped.lower()
+
+
+def _address_retry_candidates(building, digit_address):
+    """Ordered fallback address strings to retry when the first geocode
+    attempt (this record's own Building text as given) fails — the
+    caller tries each in turn, stopping at whichever one succeeds:
+
+    1. digit_address, if given (a spelled-out house number converted to
+       digits, e.g. "Thirty One Alfred Place" -> "31 Alfred Place") —
+       still a confident full street address, just spelled out.
+    2. `building` with a trailing bare postal district (no street of its
+       own, e.g. the "W1" in "5 Swallow Place, W1") stripped entirely —
+       confirmed empirically that appending a bare district code to a
+       query is unreliable (sometimes helps, sometimes breaks an
+       otherwise-working match), so this only ever tries WITHOUT one,
+       never a query built from the code alone (which was confirmed to
+       resolve to some generic district-wide centroid — shared
+       identically by every OTHER building that also fell back to it).
+    3. The address portion of a "Name, Address[, DistrictCode]" string
+       (e.g. "Princes House, 38 Jermyn Street" or, with a district code
+       also present, "Princes House, 38 Jermyn Street, SW1Y") —
+       confirmed empirically (Crown Estate, 2026-07) that Nominatim
+       returns NO MATCH AT ALL for the combined name+address string,
+       even though the address portion alone resolves correctly every
+       time it was tested — tried both with and without a trailing bare
+       district code of its own, since that combination was also
+       confirmed to sometimes fail where the bare address alone
+       succeeds."""
+    seen = set()
+    candidates = []
+
+    def add(value):
+        value = (value or "").strip().strip(",").strip()
+        if value and value not in seen:
+            seen.add(value)
+            candidates.append(value)
+
+    if digit_address:
+        add(digit_address)
+
+    no_district = _TRAILING_DISTRICT_RE.sub("", building or "").strip()
+    add(no_district)
+
+    for base in (building or "", no_district):
+        if "," not in base:
+            continue
+        before_comma, after_comma = (p.strip() for p in base.split(",", 1))
+        if _BARE_DISTRICT_RE.match(after_comma):
+            add(before_comma)
+        else:
+            add(after_comma)
+            add(_TRAILING_DISTRICT_RE.sub("", after_comma).strip())
+
+    return candidates
 
 
 def process_files(paths):
@@ -194,6 +271,26 @@ def _geocode_records(records, filename, provider_name):
     extracted fine) so a batch that had to fall back further than usual
     is explained rather than silently degraded.
     """
+    # When the SAME building appears more than once in this file with
+    # different amounts of qualifying detail (e.g. Crown Estate's "1 Vine
+    # Street, W1" for one floor vs a plain "1 Vine Street" for a different
+    # floor elsewhere in the same document — confirmed the source PDF
+    # itself just doesn't repeat the area code in every section), geocode
+    # every occurrence using whichever text is richest/most qualified.
+    # Confirmed empirically that the bare version alone can resolve
+    # confidently to a coincidentally-real but wrong address (Walthamstow,
+    # ~12km from the real Mayfair one) with no second Nominatim candidate
+    # for extraction.geocode's own ambiguity check to catch, while the
+    # qualified version resolves correctly every time.
+    richest_building = {}
+    for record in records:
+        building = (record.get("Property Address 1") or "").strip()
+        if not building:
+            continue
+        base = _normalize_building_for_grouping(building)
+        if base not in richest_building or len(building) > len(richest_building[base]):
+            richest_building[base] = building
+
     quota_exhausted = False
     for record in records:
         building = (record.get("Property Address 1") or "").strip()
@@ -205,7 +302,16 @@ def _geocode_records(records, filename, provider_name):
         digit_address = spelled_number_to_digits(building) if building and not has_digit else None
         is_bare_name = bool(building) and not has_digit and not digit_address
 
-        query = _geocode_query(record)
+        # The record actually asked about below always keeps its own
+        # Building/Property Address 1 text — this only substitutes a
+        # richer sibling's text for the *query* sent to the geocoder.
+        query_source = record
+        if building and not is_bare_name:
+            richer = richest_building.get(_normalize_building_for_grouping(building))
+            if richer and richer != building:
+                query_source = {**record, "Property Address 1": richer}
+
+        query = _geocode_query(query_source)
         derived_note = False
         sources = []
 
@@ -250,11 +356,15 @@ def _geocode_records(records, filename, provider_name):
                     derived_note = True
         else:
             lat, lng, geo_postcode, error = geocode(query)
-            if lat is None and digit_address:
-                retry_query = _geocode_query({**record, "Property Address 1": digit_address})
-                retry_lat, retry_lng, retry_postcode, retry_error = geocode(retry_query)
-                if retry_lat is not None:
-                    query, lat, lng, geo_postcode, error = retry_query, retry_lat, retry_lng, retry_postcode, retry_error
+            if lat is None:
+                for candidate_address in _address_retry_candidates(building, digit_address):
+                    retry_query = _geocode_query({**record, "Property Address 1": candidate_address})
+                    if retry_query == query:
+                        continue
+                    retry_lat, retry_lng, retry_postcode, retry_error = geocode(retry_query)
+                    if retry_lat is not None:
+                        query, lat, lng, geo_postcode, error = retry_query, retry_lat, retry_lng, retry_postcode, retry_error
+                        break
 
         postcode_from_geocode = False
         if not record.get("Property Postcode") and geo_postcode:

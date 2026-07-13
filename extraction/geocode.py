@@ -4,6 +4,7 @@ descriptive User-Agent identifying the app instead of a default library
 one): https://operations.osmfoundation.org/policies/nominatim/
 """
 import json
+import math
 import time
 from pathlib import Path
 
@@ -15,6 +16,22 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 USER_AGENT = "manage-office-availability/1.0 (contact: team@spacepoint.co.uk)"
 MIN_INTERVAL_SECONDS = 1.0
 REQUEST_TIMEOUT = 10
+
+# Confirmed empirically (2026-07, Crown Estate) that a common London street
+# name with no distinguishing context can return a *confident-looking* top
+# result that's actually many km away in an unrelated borough — Nominatim
+# itself doesn't flag this, it just returns its single best guess as if
+# unambiguous: "25 Bury Street, London, UK" -> Edmonton N9 (real address is
+# St James's SW1, ~15km away); "1 Vine Street, London, UK" -> Walthamstow
+# E17 (real address is Mayfair W1, ~12km away). Requesting a few more
+# candidates and checking how far apart they are catches this — confirmed
+# on several known-good addresses already in this app's own sources
+# (Alfred Place, Clerkenwell Green, Regent Street, Curtain Road, Jermyn
+# Street) that their own top few candidates all cluster within a few km of
+# each other, so this threshold doesn't risk flagging a genuinely good
+# match just for returning more than one plausible nearby result.
+CANDIDATE_LIMIT = 3
+AMBIGUITY_DISTANCE_KM = 5.0
 
 CACHE_PATH = Path(__file__).resolve().parent.parent / ".geocode_cache.json"
 
@@ -86,7 +103,10 @@ def _fetch(address):
             # addressdetails=1 gets a structured breakdown (road, postcode,
             # city, ...) alongside the match, so we can fall back to
             # Nominatim's postcode when the source text didn't have one.
-            params={"q": address, "format": "json", "limit": 1, "addressdetails": 1},
+            # limit=CANDIDATE_LIMIT (not just 1) so the ambiguity check
+            # below has other plausible candidates to compare the top
+            # result against.
+            params={"q": address, "format": "json", "limit": CANDIDATE_LIMIT, "addressdetails": 1},
             headers={"User-Agent": USER_AGENT},
             timeout=REQUEST_TIMEOUT,
         )
@@ -104,8 +124,35 @@ def _fetch(address):
     except (KeyError, ValueError, TypeError) as e:
         return None, None, "", f"Unexpected geocoding response shape: {e}"
 
+    for other in results[1:]:
+        try:
+            other_lat, other_lng = float(other["lat"]), float(other["lon"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        distance = _distance_km(lat, lng, other_lat, other_lng)
+        if distance > AMBIGUITY_DISTANCE_KM:
+            # Treated the same as "no match" (not a distinct return shape)
+            # so it falls through to whatever fallback the caller already
+            # has — Needs manual lookup, or a further tier for a bare-name
+            # lookup — instead of silently trusting a coincidental match.
+            return None, None, "", (
+                f"Ambiguous match: top result is {distance:.1f}km from another plausible "
+                f"candidate for this same address — not confident enough to trust"
+            )
+
     postcode = extract_postcode((results[0].get("address") or {}).get("postcode", ""))
     return lat, lng, postcode, None
+
+
+def _distance_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km — just for the ambiguity check above,
+    not precise surveying, so a simple haversine is plenty."""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
 
 
 def _throttle():

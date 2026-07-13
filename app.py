@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote
 
@@ -368,6 +369,19 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
     established gallery convention for Floor Plan the way there is for
     High Res Images.
 
+    A single-record document (e.g. BC's own "2-7 Clerkenwell Green"
+    brochure) attaches every real image in the whole PDF to that one
+    record, position irrelevant — there's no other record to misattribute
+    to. A multi-record document instead uses extraction.pdf_images.
+    match_listings_to_images to pair each image to the SPECIFIC listing
+    it's positioned next to on the page, not every record whose building
+    name happens to appear anywhere on that page — confirmed necessary
+    empirically (Crown Estate, 2026-07): its pages routinely hold 2-6
+    distinct listings sharing one page (a 2- or 3-column grid), each with
+    its own real photos, and the previous whole-page attribution silently
+    merged unrelated buildings' photos into one shared gallery whenever a
+    page held more than one listing.
+
     Returns the (storage_key, local_path) pairs for the caller to upload —
     doesn't upload them itself, so a source with many distinct images
     (e.g. Crown Estate's ~15) doesn't add that many synchronous network
@@ -375,14 +389,14 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
     process() above.
 
     Deliberately uses pdf_images.scan_pages (a cheap, hash-only pass) plus
-    load_page_images (decodes one page's images at a time, on demand)
-    rather than extract_page_images (which materializes every real image
-    for the whole document at once) — confirmed via Render's own logs
-    that processing a large PDF (Crown Estate, 4.3MB) got the worker
-    SIGKILLed for exceeding the free tier's 512MB RAM limit. Bounding this
-    to one page's images at a time caps how much of a large, photo-heavy
-    document this function can ever hold in memory at once, regardless of
-    how many pages/records it has."""
+    load_page_images/match_listings_to_images (decode one page's images
+    at a time, on demand) rather than extract_page_images (which
+    materializes every real image for the whole document at once) —
+    confirmed via Render's own logs that processing a large PDF (Crown
+    Estate, 4.3MB) got the worker SIGKILLed for exceeding the free tier's
+    512MB RAM limit. Bounding this to one page's images at a time caps how
+    much of a large, photo-heavy document this function can ever hold in
+    memory at once, regardless of how many pages/records it has."""
     page_hashes = pdf_images.scan_pages(source_path)
     if not page_hashes:
         return []
@@ -394,7 +408,7 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
     gallery_url_by_photos = {}  # tuple(photo URLs) -> gallery (or single-
     # image) URL, so 2+ listings sharing the same real photos (e.g. two
     # floors of one building) share one file instead of a duplicate.
-    gallery_count = 0
+    gallery_state = {"count": 0}
 
     def _save(page_num, image_bytes, ext):
         h = hashlib.sha256(image_bytes).hexdigest()
@@ -405,59 +419,66 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
             saved_image_urls[h] = _download_url(batch_id, image_filename)
         return saved_image_urls[h]
 
-    for record in records:
+    def _finish_record(record, page_images):
+        """page_images: [(page_num, image_bytes, ext), ...] already
+        matched to this one record — classifies each as floor plan vs
+        photo, saves/uploads, and sets Floor Plan/High Res Images."""
         building = record.get("Building")
-        if len(records) == 1:
-            # A single-listing brochure spanning the whole document (e.g.
-            # BC's own "2-7 Clerkenwell Green" brochure) — confirmed
-            # empirically the building name only recurs on some pages
-            # (a generic "Location"/"Key features"/pricing page doesn't
-            # repeat it), so name-searching page-by-page would undercount.
-            # The entire document is unambiguously about this one listing
-            # regardless of which pages happen to repeat its name, so
-            # every real image in it belongs to this record — skip the
-            # name search entirely rather than only falling back when it
-            # finds literally nothing.
-            matching_pages = sorted(page_hashes.keys())
-        else:
-            matching_pages = pdf_images.find_matching_pages(building, pages_text)
-
         photo_urls = []
         floorplan_url = None
-        for p in matching_pages:
-            if p not in page_hashes:
-                continue
-            page_is_labeled_floorplan = pdf_images.is_floorplan_page(pages_text[p] if p < len(pages_text) else "")
-            # Decoded on demand, one page at a time — never more than one
-            # page's own images resident at once (see the docstring above).
-            for image_bytes, ext in pdf_images.load_page_images(source_path, p, page_hashes[p]):
-                is_floorplan = page_is_labeled_floorplan or pdf_images.is_floorplan_image(image_bytes)
-                url = _save(p, image_bytes, ext)
-                if is_floorplan:
-                    if floorplan_url is None:
-                        floorplan_url = url
-                elif url not in photo_urls:
-                    photo_urls.append(url)
+        for page_num, image_bytes, ext in page_images:
+            page_is_labeled_floorplan = pdf_images.is_floorplan_page(pages_text[page_num] if page_num < len(pages_text) else "")
+            is_floorplan = page_is_labeled_floorplan or pdf_images.is_floorplan_image(image_bytes)
+            url = _save(page_num, image_bytes, ext)
+            if is_floorplan:
+                if floorplan_url is None:
+                    floorplan_url = url
+            elif url not in photo_urls:
+                photo_urls.append(url)
 
         if floorplan_url:
             record["Floor Plan"] = floorplan_url
-
         if not photo_urls:
-            continue
+            return
 
         photos_key = tuple(photo_urls)
         if photos_key not in gallery_url_by_photos:
             if len(photo_urls) == 1:
                 gallery_url_by_photos[photos_key] = photo_urls[0]
             else:
-                gallery_count += 1
-                gallery_filename = f"{name}_gallery{gallery_count}.html"
+                gallery_state["count"] += 1
+                gallery_filename = f"{name}_gallery{gallery_state['count']}.html"
                 gallery_html = pdf_images.build_gallery_html(building or name, photo_urls)
                 (batch_dir / gallery_filename).write_text(gallery_html, encoding="utf-8")
                 jobs.append((f"{batch_id}/{gallery_filename}", batch_dir / gallery_filename))
                 gallery_url_by_photos[photos_key] = _download_url(batch_id, gallery_filename)
-
         record["High Res Images"] = gallery_url_by_photos[photos_key]
+
+    if len(records) == 1:
+        # A single-listing brochure spanning the whole document — see the
+        # docstring above for why this skips position-based matching
+        # entirely: with only one record, every real image belongs to it
+        # regardless of where on the page it sits.
+        page_images = [
+            (p, image_bytes, ext)
+            for p in sorted(page_hashes.keys())
+            for image_bytes, ext in pdf_images.load_page_images(source_path, p, page_hashes[p])
+        ]
+        _finish_record(records[0], page_images)
+        return jobs
+
+    records_by_page = defaultdict(list)
+    for i, record in enumerate(records):
+        building = record.get("Building")
+        for p in pdf_images.find_matching_pages(building, pages_text):
+            if p in page_hashes:
+                records_by_page[p].append((i, building))
+
+    images_by_record = pdf_images.match_listings_to_images(source_path, page_hashes, records_by_page)
+    for i, record in enumerate(records):
+        page_images = images_by_record.get(i)
+        if page_images:
+            _finish_record(record, page_images)
 
     return jobs
 
