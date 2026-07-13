@@ -420,13 +420,27 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
         return saved_image_urls[h]
 
     def _finish_record(record, page_images):
-        """page_images: [(page_num, image_bytes, ext), ...] already
-        matched to this one record — classifies each as floor plan vs
-        photo, saves/uploads, and sets Floor Plan/High Res Images."""
+        """page_images: [(page_num, image_bytes, ext, link_floorplan_url), ...]
+        already matched to this one record — classifies each as floor plan
+        vs photo, saves/uploads, and sets Floor Plan/High Res Images.
+
+        link_floorplan_url (extraction.pdf_images._link_uri_for_rect)
+        takes priority over the pixel/text-based classification below:
+        confirmed empirically (Crown Estate, 2026-07) that a source can
+        put a link annotation directly on top of a listing's own photo,
+        pointing to an external 3D-tour/floor-plan viewer — a real,
+        source-labeled Floor Plan signal that isn't visible in the
+        image's own pixel content or embedded bytes at all, so it can't
+        be found by is_floorplan_image no matter how it's tuned. The
+        image itself still gets classified/saved normally regardless —
+        a listing can have both a real photo (High Res Images) and a
+        separate floor-plan/tour link (Floor Plan) at once."""
         building = record.get("Building")
         photo_urls = []
         floorplan_url = None
-        for page_num, image_bytes, ext in page_images:
+        for page_num, image_bytes, ext, link_floorplan_url in page_images:
+            if floorplan_url is None and link_floorplan_url:
+                floorplan_url = link_floorplan_url
             page_is_labeled_floorplan = pdf_images.is_floorplan_page(pages_text[page_num] if page_num < len(pages_text) else "")
             is_floorplan = page_is_labeled_floorplan or pdf_images.is_floorplan_image(image_bytes)
             url = _save(page_num, image_bytes, ext)
@@ -460,19 +474,51 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
         # entirely: with only one record, every real image belongs to it
         # regardless of where on the page it sits.
         page_images = [
-            (p, image_bytes, ext)
+            (p, image_bytes, ext, link_floorplan_url)
             for p in sorted(page_hashes.keys())
-            for image_bytes, ext in pdf_images.load_page_images(source_path, p, page_hashes[p])
+            for image_bytes, ext, link_floorplan_url in pdf_images.load_page_images(source_path, p, page_hashes[p])
         ]
         _finish_record(records[0], page_images)
         return jobs
 
-    records_by_page = defaultdict(list)
+    # Grouped by exact Building text (not just find_matching_pages'
+    # overlapping candidates) so several floors sharing byte-identical
+    # text — e.g. Crown Estate's "Princes House, 38 Jermyn Street" across
+    # 4 pages, 2 floors per page — get distributed across their REAL
+    # distinct page occurrences via pdf_images.count_heading_occurrences,
+    # rather than every one of them being registered on every matching
+    # page (which would let several pages' images all pile onto whichever
+    # records happen to come first, while later floors get none at all —
+    # confirmed exactly this empirically, 2026-07).
+    same_building_records = defaultdict(list)
     for i, record in enumerate(records):
-        building = record.get("Building")
-        for p in pdf_images.find_matching_pages(building, pages_text):
-            if p in page_hashes:
-                records_by_page[p].append((i, building))
+        same_building_records[record.get("Building") or ""].append(i)
+
+    records_by_page = defaultdict(list)
+    for building, indices in same_building_records.items():
+        if len(indices) == 1:
+            matching_pages = [p for p in pdf_images.find_matching_pages(building, pages_text) if p in page_hashes]
+            for p in matching_pages:
+                records_by_page[p].append((indices[0], building))
+            continue
+        # Several records share this exact text — find_all_matching_pages
+        # (the union across every candidate tier), not find_matching_pages
+        # (stops at the first tier that matches anything): confirmed
+        # necessary when those records' real occurrences sit on pages
+        # with different levels of text detail (e.g. one page's raw text
+        # repeats an area code, another floor of the same building sits
+        # on a page that doesn't) — the narrower single-tier lookup would
+        # silently miss whichever page only the broader tier matches.
+        matching_pages = [p for p in pdf_images.find_all_matching_pages(building, pages_text) if p in page_hashes]
+        if not matching_pages:
+            continue
+        occurrence_counts = pdf_images.count_heading_occurrences(source_path, matching_pages, building)
+        remaining = list(indices)
+        for p in matching_pages:
+            for _ in range(occurrence_counts.get(p, 0)):
+                if not remaining:
+                    break
+                records_by_page[p].append((remaining.pop(0), building))
 
     images_by_record = pdf_images.match_listings_to_images(source_path, page_hashes, records_by_page)
     for i, record in enumerate(records):

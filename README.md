@@ -120,18 +120,39 @@ parser added to `extraction/rules/`.
    (`extraction/rules/knotel.py`). For a PDF source with no rule-based
    parser (LLM fallback — e.g. BC, Crown Estate), `extraction/pdf_images.py`
    extracts the source PDF's own embedded images (excluding
-   logos/banners repeated across many pages) and classifies each one as a
-   floor-plan diagram or a real photo (`is_floorplan_page`'s source-labeled
-   text check, e.g. BC's own "Example Floorplan" heading, plus
-   `is_floorplan_image`'s pixel-content fallback — a floor plan's mostly-white
-   background versus a real photo's, confirmed empirically across several
-   sources). Confirmed on Crown Estate (2026-07) that a source can
-   legitimately have zero floor-plan images at all — every one of its 83
-   embedded images, across every section of the document, turned out to be
-   a real interior or exterior photograph when actually viewed; Floor Plan
-   staying blank for all of that source's rows is the correct outcome, not
-   a classifier bug, and there's nothing to fabricate a distinction from
-   when the source genuinely doesn't have one.
+   logos/banners repeated across many pages).
+
+   Floor Plan can come from two different signals, checked in this order:
+   1. A link annotation the source itself placed directly on top of a
+      listing's own image, pointing to an external resource
+      (`_link_uri_for_rect`, IoU-matched against the image's own
+      placement rect — deliberately intersection-over-union, not "does
+      the link's rect sit inside the image's", since a small unrelated
+      icon fully contained in a much larger photo would otherwise score
+      as a full match; confirmed empirically on BC's own brochure, where
+      a "watch our video" YouTube icon sits inside a much bigger unrelated
+      photo). Confirmed on Crown Estate (2026-07) — by directly clicking
+      images in the real PDF — that each listing's own photo is a
+      clickable link to an external 3D-tour/floor-plan viewer
+      (my.matterport.com, a white-label viewer domain hosting the same
+      kind of tour, or in one case the broker's own property page/
+      homepage) — a real, source-labeled signal sitting on top of the
+      image, not visible in the image's own pixel content or embedded
+      bytes at all, so no pixel-based classifier could ever find it.
+   2. Failing that, `is_floorplan_page`'s source-labeled text check (e.g.
+      BC's own "Example Floorplan" heading) plus `is_floorplan_image`'s
+      pixel-content fallback — a floor plan's mostly-white background
+      versus a real photo's, confirmed empirically across several
+      sources. On Crown Estate specifically, every one of its 83 embedded
+      images turned out to be a real interior/exterior photograph when
+      actually viewed — this tier alone would have left Floor Plan blank
+      for that source entirely; tier 1 above is what actually populates
+      it there.
+
+   A listing can have both a real photo (High Res Images) and a separate
+   floor-plan/tour link (Floor Plan) from the same source image at once —
+   the image itself is still saved/classified normally regardless of
+   whichever link, if any, was found for it.
 
    A page with more than one listing (routine on Crown Estate — a 2- or
    3-column grid, several listings sharing one page) matches each real
@@ -141,14 +162,32 @@ parser added to `extraction/rules/`.
    column), not to every listing whose name happens to appear anywhere on
    that page — confirmed this matters empirically: the earlier whole-page
    attribution silently merged unrelated buildings' photos into one shared
-   gallery whenever a page held more than one listing. A single-record
-   document (e.g. BC's own single-listing brochure) skips this — every
-   real image in it belongs to that one record regardless of position, no
-   attribution risk with nothing else to confuse it with.
+   gallery whenever a page held more than one listing.
+
+   Several records can also share byte-identical Building text when the
+   same building spans multiple floors, each its own page or page-pair
+   (e.g. Crown Estate's "Princes House, 38 Jermyn Street" across 4 pages,
+   2 floors per page) — `find_all_matching_pages` (the union across every
+   name-matching tier, not just the first one that matches anything) plus
+   `count_heading_occurrences` distribute those records across their real
+   distinct page occurrences in order (2 records to a page with 2
+   headings, 1 to a page with only 1, etc.), confirmed necessary
+   empirically: naively registering every same-name record on every page
+   its name appears on let several pages' images all pile onto whichever
+   records happened to come first, while later floors got no images at
+   all — and a narrower single-tier page lookup (fine for one record on
+   its own) can miss a floor's own page entirely when that floor's
+   occurrence only matches a broader tier (e.g. one page's raw text
+   includes a postal area code a sibling floor's page doesn't repeat).
+
+   A single-record document (e.g. BC's own single-listing brochure) skips
+   all of the above — every real image in it belongs to that one record
+   regardless of position, no attribution risk with nothing else to
+   confuse it with.
 
    Either way, Floor Plan/High Res Images are left blank whenever a source
-   has no embedded images at all, or a listing's page/position can't be
-   matched — never fabricated.
+   has no embedded images/links at all, or a listing's page/position can't
+   be matched — never fabricated.
 
    `/api/download` always tries local disk first (fast path — the batch
    that just ran). If the local copy is gone — Render's free-tier disk is

@@ -269,7 +269,7 @@ def check_pdf_floorplan_vs_photos(failures, filename, building, name, expect_gal
     photo_hashes = set()
     for page_num, imgs in page_images.items():
         page_is_labeled_floorplan = pdf_images.is_floorplan_page(pages_text[page_num] if page_num < len(pages_text) else "")
-        for image_bytes, _ext in imgs:
+        for image_bytes, _ext, _link_floorplan_url in imgs:
             h = hashlib.sha256(image_bytes).hexdigest()
             if page_is_labeled_floorplan or pdf_images.is_floorplan_image(image_bytes):
                 floorplan_hashes.add(h)

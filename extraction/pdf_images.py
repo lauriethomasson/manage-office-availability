@@ -31,6 +31,63 @@ BOILERPLATE_MAX_PAGES = 2
 # wide, safe margin rather than sitting right at the boundary.
 MIN_IMAGE_BYTES = 3000
 
+# A link annotation's own rect can differ slightly from the image's own
+# placement rect for the same visual region (confirmed empirically on
+# Crown Estate) — this is a generous-but-not-promiscuous IoU
+# (intersection-over-union) threshold for treating the two as "the same
+# spot", not an exact-equality check. Deliberately IoU, not "fraction of
+# the smaller rect": confirmed empirically (BC's Clerkenwell Green
+# brochure) that a small "watch our video"/"book a tour" link icon can
+# sit entirely INSIDE a much larger unrelated photo — a fraction-of-
+# smaller-rect check scores that as 100% overlap (the tiny link is fully
+# contained), wrongly treating an incidental icon as if it were placed to
+# cover the whole photo. IoU penalizes exactly this kind of size
+# mismatch, since the union includes all the photo's area the tiny link
+# doesn't cover.
+_LINK_OVERLAP_THRESHOLD = 0.5
+
+
+def _rect_overlap_fraction(a, b):
+    """Intersection-over-union of two (x0, y0, x1, y1) rects — 0.0 if they
+    don't overlap at all, 1.0 if they're identical."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    intersection = (ix1 - ix0) * (iy1 - iy0)
+    area_a = (ax1 - ax0) * (ay1 - ay0)
+    area_b = (bx1 - bx0) * (by1 - by0)
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _link_uri_for_rect(links, rect):
+    """Returns the URI of whichever of a page's own link annotations
+    overlaps `rect` the most (above _LINK_OVERLAP_THRESHOLD), or None.
+
+    Confirmed empirically (Crown Estate, 2026-07) that each real
+    per-listing image on a page can carry its own link annotation
+    pointing to an external 3D-tour/floor-plan viewer (my.matterport.com,
+    or a white-label viewer domain hosting the same kind of tour) — a
+    real, source-labeled Floor Plan signal sitting on TOP of the image
+    itself, not something visible in the image's own pixel content or
+    embedded bytes at all, so extraction.pdf_images.is_floorplan_image's
+    pixel-based check can never see it. Confirmed distinct per image
+    (not one shared link for a whole page): each listing's own image had
+    its own distinct tour ID."""
+    best_uri, best_overlap = None, 0.0
+    for link in links:
+        uri = link.get("uri")
+        lrect = link.get("from")
+        if not uri or lrect is None:
+            continue
+        overlap = _rect_overlap_fraction(rect, (lrect.x0, lrect.y0, lrect.x1, lrect.y1))
+        if overlap > best_overlap:
+            best_overlap, best_uri = overlap, uri
+    return best_uri if best_overlap > _LINK_OVERLAP_THRESHOLD else None
+
 
 def scan_pages(path):
     """Pass 1 of the memory-bounded extraction split (see load_page_images
@@ -121,9 +178,11 @@ def load_page_images(path, page_num, allowed_hashes):
     entire single-pass extraction across a whole 20-page brochure), so
     trading a little redundant CPU for never holding more than one page's
     images at a time is the right side of that tradeoff here. Returns
-    [(image_bytes, ext), ...] in first-seen order — [] if PyMuPDF isn't
-    installed, the PDF can't be reopened, or the page index is out of
-    range; never raises."""
+    [(image_bytes, ext, floorplan_url), ...] in first-seen order — []
+    if PyMuPDF isn't installed, the PDF can't be reopened, or the page
+    index is out of range; never raises. floorplan_url (see
+    _link_uri_for_rect) is the URI of a link annotation covering this
+    image's own position, if any — None otherwise."""
     try:
         import fitz
     except ImportError:
@@ -137,12 +196,15 @@ def load_page_images(path, page_num, allowed_hashes):
     try:
         if page_num < 0 or page_num >= len(doc):
             return []
+        page = doc[page_num]
+        links = page.get_links()
         allowed = set(allowed_hashes)
         seen = set()
         result = []
-        for img in doc[page_num].get_images(full=True):
+        for img in page.get_images(full=True):
+            xref = img[0]
             try:
-                base = doc.extract_image(img[0])
+                base = doc.extract_image(xref)
             except Exception:
                 continue
             data = base.get("image")
@@ -152,7 +214,12 @@ def load_page_images(path, page_num, allowed_hashes):
             if h not in allowed or h in seen:
                 continue
             seen.add(h)
-            result.append((data, base.get("ext", "png")))
+            rects = page.get_image_rects(xref)
+            floorplan_url = None
+            if rects:
+                rect = rects[0]
+                floorplan_url = _link_uri_for_rect(links, (rect.x0, rect.y0, rect.x1, rect.y1))
+            result.append((data, base.get("ext", "png"), floorplan_url))
         return result
     finally:
         doc.close()
@@ -176,11 +243,12 @@ def load_page_images(path, page_num, allowed_hashes):
 
 
 def extract_page_images(path):
-    """Returns {page_num (0-indexed): [(image_bytes, ext), ...]} — real,
-    non-boilerplate, non-tiny images only, deduped within a page, in
-    first-seen order. Returns {} if PyMuPDF isn't installed or the PDF
-    can't be opened/has no images — never raises, this is always an
-    optional enrichment, not something that should fail extraction.
+    """Returns {page_num (0-indexed): [(image_bytes, ext, floorplan_url), ...]}
+    — real, non-boilerplate, non-tiny images only, deduped within a page,
+    in first-seen order (see load_page_images for floorplan_url). Returns
+    {} if PyMuPDF isn't installed or the PDF can't be opened/has no
+    images — never raises, this is always an optional enrichment, not
+    something that should fail extraction.
 
     A convenience wrapper around scan_pages + load_page_images that
     materializes every page's images at once, same as this function's
@@ -214,10 +282,13 @@ def match_listings_to_images(path, page_hashes, records_by_page):
     original extraction order, for records whose find_matching_pages()
     result included that page.
 
-    Returns {record_index: [(page_num, image_bytes, ext), ...]} — page_num
-    included (not just implied by the records_by_page key the caller
-    already has) so a caller can still tell which source page a given
-    image came from, e.g. for is_floorplan_page's own per-page text check.
+    Returns {record_index: [(page_num, image_bytes, ext, floorplan_url), ...]}
+    — page_num included (not just implied by the records_by_page key the
+    caller already has) so a caller can still tell which source page a
+    given image came from, e.g. for is_floorplan_page's own per-page text
+    check. floorplan_url (see _link_uri_for_rect) is the URI of a link
+    annotation covering this image's own position, if any — None
+    otherwise.
 
     Algorithm, per page: locate each candidate listing's own heading text
     block (matching _building_candidates the same way find_matching_pages
@@ -249,9 +320,10 @@ def match_listings_to_images(path, page_hashes, records_by_page):
             if not allowed:
                 continue
             page = doc[page_num]
+            links = page.get_links()
 
             # 1. Each real image's own position(s) + hash on this page.
-            image_positions = []  # (bbox, image_bytes, ext)
+            image_positions = []  # (bbox, image_bytes, ext, floorplan_url)
             for img in page.get_images(full=True):
                 xref = img[0]
                 try:
@@ -266,7 +338,8 @@ def match_listings_to_images(path, page_hashes, records_by_page):
                     continue
                 ext = base.get("ext", "png")
                 for rect in page.get_image_rects(xref):
-                    image_positions.append((rect, data, ext))
+                    floorplan_url = _link_uri_for_rect(links, (rect.x0, rect.y0, rect.x1, rect.y1))
+                    image_positions.append((rect, data, ext, floorplan_url))
             if not image_positions:
                 continue
 
@@ -294,7 +367,7 @@ def match_listings_to_images(path, page_hashes, records_by_page):
 
             # 3. Each real image -> nearest heading above it, in the same
             # horizontal band (x-overlap), not just anywhere on the page.
-            for (ix0, iy0, ix1, iy1), data, ext in image_positions:
+            for (ix0, iy0, ix1, iy1), data, ext, floorplan_url in image_positions:
                 best_index, best_y1 = None, None
                 for record_index, (hx0, hy0, hx1, hy1) in headings:
                     overlaps_x = hx0 < ix1 and hx1 > ix0
@@ -303,7 +376,7 @@ def match_listings_to_images(path, page_hashes, records_by_page):
                     if best_y1 is None or hy1 > best_y1:
                         best_y1, best_index = hy1, record_index
                 if best_index is not None:
-                    result.setdefault(best_index, []).append((page_num, data, ext))
+                    result.setdefault(best_index, []).append((page_num, data, ext, floorplan_url))
     finally:
         doc.close()
         try:
@@ -359,6 +432,87 @@ def find_matching_pages(building_name, pages_text):
         if matches:
             return matches
     return []
+
+
+def find_all_matching_pages(building_name, pages_text):
+    """Like find_matching_pages, but the UNION of every candidate tier's
+    own matches, instead of stopping at the first tier that matches
+    anything.
+
+    Needed specifically when several records share byte-identical
+    Building text and their real occurrences are spread across pages
+    with different levels of text detail — confirmed empirically (Crown
+    Estate, 2026-07): "1 Vine Street, W1" matches one page's own raw text
+    exactly (comma and area code both present), but a DIFFERENT floor of
+    the exact same building sits on a page whose own layout doesn't
+    repeat the area code, so only the bare "1 Vine Street" (a narrower
+    candidate tier) matches there. find_matching_pages' single-first-tier
+    behavior finds the first page and stops, silently missing the
+    second occurrence's page entirely — fine for a single record (an
+    over-broad narrower tier risks matching an unrelated page), but wrong
+    for grouping several same-text records across their real occurrences,
+    where every candidate tier's pages are genuinely relevant."""
+    pages = set()
+    for candidate in _building_candidates(building_name):
+        if not pages_text:
+            continue
+        pages.update(i for i, text in enumerate(pages_text) if candidate in (text or "").lower())
+    return sorted(pages)
+
+
+def count_heading_occurrences(path, page_nums, building_name):
+    """Returns {page_num: count} — how many of a page's own text blocks
+    match building_name's own _building_candidates, for each page in
+    page_nums.
+
+    Needed alongside find_matching_pages, not instead of it: several
+    records can share byte-identical Building text when the same
+    building spans several floors (e.g. Crown Estate's "Princes House,
+    38 Jermyn Street" across 4 pages, 2 floors per page) — and
+    find_matching_pages naturally returns EVERY one of those pages for
+    EVERY one of those records, since it only answers "where does this
+    name appear at all", not "which specific occurrence is this
+    particular record". Naively registering every such record on every
+    matching page (in a caller building a page->records map) lets several
+    pages' images all pile onto whichever records happen to come first,
+    while later floors get no images at all — confirmed exactly this
+    empirically (Crown Estate, 2026-07): only the first 2 of 7 "Princes
+    House" floors ended up with any image, the other 5 got none, even
+    though every one of those 4 pages had its own real, distinct photos.
+
+    This lets a caller distribute several same-name records across their
+    real distinct page occurrences in order (2 records to a page with 2
+    headings, 1 to a page with only 1, etc.) instead of assuming
+    ambiguously that every one of them belongs to every matching page."""
+    try:
+        import fitz
+    except ImportError:
+        return {}
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return {}
+
+    candidates = _building_candidates(building_name)
+    counts = {}
+    try:
+        for page_num in page_nums:
+            if page_num < 0 or page_num >= len(doc):
+                continue
+            count = 0
+            for block in doc[page_num].get_text("blocks"):
+                text = (block[4] or "").strip()
+                if text and any(c in text.lower() for c in candidates):
+                    count += 1
+            counts[page_num] = count
+    finally:
+        doc.close()
+        try:
+            fitz.TOOLS.store_shrink(100)
+        except Exception:
+            pass
+
+    return counts
 
 
 def _building_candidates(building_name):
