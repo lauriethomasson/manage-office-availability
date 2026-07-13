@@ -348,9 +348,19 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
     doesn't upload them itself, so a source with many distinct images
     (e.g. Crown Estate's ~15) doesn't add that many synchronous network
     round-trips to this request; see the background-thread upload in
-    process() above."""
-    page_images = pdf_images.extract_page_images(source_path)
-    if not page_images:
+    process() above.
+
+    Deliberately uses pdf_images.scan_pages (a cheap, hash-only pass) plus
+    load_page_images (decodes one page's images at a time, on demand)
+    rather than extract_page_images (which materializes every real image
+    for the whole document at once) — confirmed via Render's own logs
+    that processing a large PDF (Crown Estate, 4.3MB) got the worker
+    SIGKILLed for exceeding the free tier's 512MB RAM limit. Bounding this
+    to one page's images at a time caps how much of a large, photo-heavy
+    document this function can ever hold in memory at once, regardless of
+    how many pages/records it has."""
+    page_hashes = pdf_images.scan_pages(source_path)
+    if not page_hashes:
         return []
 
     jobs = []
@@ -384,17 +394,19 @@ def _attach_pdf_images(records, source_path, pages_text, batch_dir, batch_id, na
             # every real image in it belongs to this record — skip the
             # name search entirely rather than only falling back when it
             # finds literally nothing.
-            matching_pages = sorted(page_images.keys())
+            matching_pages = sorted(page_hashes.keys())
         else:
             matching_pages = pdf_images.find_matching_pages(building, pages_text)
 
         photo_urls = []
         floorplan_url = None
         for p in matching_pages:
-            if p not in page_images:
+            if p not in page_hashes:
                 continue
             page_is_labeled_floorplan = pdf_images.is_floorplan_page(pages_text[p] if p < len(pages_text) else "")
-            for image_bytes, ext in page_images[p]:
+            # Decoded on demand, one page at a time — never more than one
+            # page's own images resident at once (see the docstring above).
+            for image_bytes, ext in pdf_images.load_page_images(source_path, p, page_hashes[p]):
                 is_floorplan = page_is_labeled_floorplan or pdf_images.is_floorplan_image(image_bytes)
                 url = _save(p, image_bytes, ext)
                 if is_floorplan:

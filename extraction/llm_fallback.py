@@ -162,7 +162,18 @@ def _build_prompt(text, source_hint):
 def _parse_and_validate(raw):
     cleaned = re.sub(r"^```(json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
     try:
-        data = json.loads(cleaned)
+        # raw_decode (not json.loads) deliberately: confirmed empirically
+        # on a real Crown Estate response that the model can otherwise
+        # return a fully complete, valid JSON object with one stray
+        # trailing character after it (e.g. an extra '"' with nothing
+        # else following) — json.loads rejects the entire response for
+        # that ("Extra data"), even though the actual listings data is
+        # intact and parses correctly. raw_decode parses just the first
+        # complete JSON value and ignores anything after it, so a
+        # genuinely truncated/malformed prefix (the failure mode this
+        # should still catch) still raises, but a complete answer with
+        # harmless trailing noise doesn't get thrown away.
+        data, _ = json.JSONDecoder().raw_decode(cleaned)
     except json.JSONDecodeError as e:
         raise LLMExtractionError(f"LLM response was not valid JSON: {e}")
 

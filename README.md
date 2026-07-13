@@ -348,6 +348,20 @@ regardless, so nothing here is meant to persist long-term.
   paid instance stays running), or if you need more than 750 hours/month
   across free services (unlikely for this use case). Render's cheapest
   paid tier is a few dollars/month.
+- **512MB RAM.** Confirmed (2026-07) that processing a large, image-heavy
+  PDF (Crown Estate, 4.3MB/20 pages) got the worker SIGKILLed for
+  exceeding this. `extraction/pdf_images.py`'s embedded-image extraction
+  now decodes at most one page's images at a time (`scan_pages` +
+  `load_page_images`) instead of holding every real image in the whole
+  document in memory at once, and `extraction/file_readers.py` rejects a
+  PDF over `MAX_PDF_PAGES` (300) up front with a clear per-file error
+  instead of attempting it. The Procfile/`render.yaml` startCommand also
+  adds `--max-requests 40 --max-requests-jitter 10`: this app runs a
+  single long-lived gunicorn worker, and native C extensions (PyMuPDF,
+  Pillow) don't reliably return freed memory to the OS, so RSS can
+  ratchet upward across a session's worth of requests even when each
+  individual file is well-behaved on its own — periodically recycling the
+  worker resets that accumulation.
 
 ### Persistent storage (optional)
 

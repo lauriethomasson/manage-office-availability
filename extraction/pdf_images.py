@@ -32,12 +32,30 @@ BOILERPLATE_MAX_PAGES = 2
 MIN_IMAGE_BYTES = 3000
 
 
-def extract_page_images(path):
-    """Returns {page_num (0-indexed): [(image_bytes, ext), ...]} — real,
-    non-boilerplate, non-tiny images only, deduped within a page, in
-    first-seen order. Returns {} if PyMuPDF isn't installed or the PDF
-    can't be opened/has no images — never raises, this is always an
-    optional enrichment, not something that should fail extraction."""
+def scan_pages(path):
+    """Pass 1 of the memory-bounded extraction split (see load_page_images
+    for pass 2): identifies which pages have real, non-boilerplate images
+    and which content-hashes those are, WITHOUT retaining any image's raw
+    bytes past the moment it's hashed.
+
+    Confirmed empirically (2026-07) on a large Render free-tier PDF (Crown
+    Estate, 4.3MB) that the original single-pass version of this module —
+    decode every image on every page, then keep every one of them (deduped
+    by hash, but still the full set of distinct real images in the whole
+    document) alive in memory for as long as the caller took to walk every
+    record and upload each match — could hold much more of a document's
+    embedded photography in memory at once than any single page ever
+    needs, on a document with many/large real photos (a 20-30MB brochure
+    with high-resolution per-listing photography is a real, plausible
+    document even though this specific example's images totaled a modest
+    few MB). Splitting into a cheap hash-only scan (this function) plus an
+    on-demand, one-page-at-a-time loader (load_page_images) bounds peak
+    memory to roughly one page's own images, regardless of how large or
+    image-heavy the document as a whole is.
+
+    Returns {page_num (0-indexed): [hash, ...]} for pages with at least
+    one real (non-boilerplate, non-tiny) image, in first-seen order — {}
+    if PyMuPDF isn't installed or the PDF can't be opened/has no images."""
     try:
         import fitz
     except ImportError:
@@ -49,8 +67,6 @@ def extract_page_images(path):
         return {}
 
     hash_pages = defaultdict(set)
-    hash_bytes = {}
-    hash_ext = {}
     page_hashes = defaultdict(list)
 
     try:
@@ -65,9 +81,10 @@ def extract_page_images(path):
                     continue
                 h = hashlib.sha256(data).hexdigest()
                 hash_pages[h].add(page_num)
-                hash_bytes[h] = data
-                hash_ext[h] = base.get("ext", "png")
                 page_hashes[page_num].append(h)
+                # `data`/`base` go out of scope at the end of this
+                # iteration — deliberately never stashed anywhere past
+                # hashing; that's the whole point of this pass.
     finally:
         doc.close()
 
@@ -77,8 +94,79 @@ def extract_page_images(path):
     for page_num, hashes in page_hashes.items():
         real = list(dict.fromkeys(h for h in hashes if h not in boilerplate))
         if real:
-            result[page_num] = [(hash_bytes[h], hash_ext[h]) for h in real]
+            result[page_num] = real
     return result
+
+
+def load_page_images(path, page_num, allowed_hashes):
+    """Pass 2: re-opens the PDF just to decode the real images on ONE
+    specific page, filtered to `allowed_hashes` (that page's own entry
+    from scan_pages' result, above) so a page that also contains a
+    boilerplate banner doesn't return it a second way. Called once per
+    (page, record-match) from the caller's own loop, immediately after
+    which the caller uploads and discards the bytes — so at most one
+    page's real images are ever resident at once, never the whole
+    document's.
+
+    Deliberately reopens the file per call rather than keeping one
+    fitz.Document handle open across many calls: PyMuPDF's own per-page
+    decode cost is small (confirmed empirically: ~0.1s for this module's
+    entire single-pass extraction across a whole 20-page brochure), so
+    trading a little redundant CPU for never holding more than one page's
+    images at a time is the right side of that tradeoff here. Returns
+    [(image_bytes, ext), ...] in first-seen order — [] if PyMuPDF isn't
+    installed, the PDF can't be reopened, or the page index is out of
+    range; never raises."""
+    try:
+        import fitz
+    except ImportError:
+        return []
+
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return []
+
+    try:
+        if page_num < 0 or page_num >= len(doc):
+            return []
+        allowed = set(allowed_hashes)
+        seen = set()
+        result = []
+        for img in doc[page_num].get_images(full=True):
+            try:
+                base = doc.extract_image(img[0])
+            except Exception:
+                continue
+            data = base.get("image")
+            if not data or len(data) < MIN_IMAGE_BYTES:
+                continue
+            h = hashlib.sha256(data).hexdigest()
+            if h not in allowed or h in seen:
+                continue
+            seen.add(h)
+            result.append((data, base.get("ext", "png")))
+        return result
+    finally:
+        doc.close()
+
+
+def extract_page_images(path):
+    """Returns {page_num (0-indexed): [(image_bytes, ext), ...]} — real,
+    non-boilerplate, non-tiny images only, deduped within a page, in
+    first-seen order. Returns {} if PyMuPDF isn't installed or the PDF
+    can't be opened/has no images — never raises, this is always an
+    optional enrichment, not something that should fail extraction.
+
+    A convenience wrapper around scan_pages + load_page_images that
+    materializes every page's images at once, same as this function's
+    original (single-pass) implementation — kept for callers that
+    genuinely want the whole document's images together (e.g. this
+    module's own test coverage) and don't need the peak-memory bound
+    app.py's real request path cares about; see _attach_pdf_images in
+    app.py for the page-by-page caller that actually needs that bound."""
+    page_hashes = scan_pages(path)
+    return {page_num: load_page_images(path, page_num, hashes) for page_num, hashes in page_hashes.items()}
 
 
 _FLOORPLAN_TEXT_RE = re.compile(r"floor[\s-]?plan", re.IGNORECASE)

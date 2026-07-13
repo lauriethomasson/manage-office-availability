@@ -10,7 +10,24 @@ services:
     # on top of the LLM extraction call itself; confirmed a real ~26-second
     # cold run (Crown Estate, ~26 distinct buildings) sits right at the old
     # limit even before counting Render's own network latency.
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120
+    #
+    # --max-requests 40 --max-requests-jitter 10: this app runs a single
+    # worker (no --workers flag) for the lifetime of the service — PyMuPDF/
+    # Pillow are C extensions that don't reliably return freed memory to
+    # the OS, so RSS can ratchet upward across a session's worth of
+    # requests even when each individual file is well-behaved on its own
+    # (confirmed: processing one large PDF in isolation, locally, peaks
+    # nowhere near the free tier's 512MB ceiling — see extraction/
+    # pdf_images.py's own memory-bounding fix — so an accumulation effect
+    # across earlier requests in the same long-lived worker is the more
+    # likely explanation for a SIGKILL that isolated local testing can't
+    # reproduce). Gunicorn gracefully restarts the worker after this many
+    # requests (jittered so a multi-service deploy wouldn't restart every
+    # worker in lockstep, though only one worker exists here) — a standard
+    # mitigation for exactly this class of native-extension memory creep,
+    # trading an occasional extra ~1s worker-startup cost for a hard reset
+    # of any accumulated fragmentation.
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --max-requests 40 --max-requests-jitter 10
     envVars:
       - key: GEMINI_API_KEY
         sync: false

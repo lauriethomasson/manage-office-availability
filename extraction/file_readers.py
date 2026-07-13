@@ -86,6 +86,16 @@ def _parse_pdf_date(raw):
         return None
 
 
+# A backstop against genuinely pathological documents, not a tuning knob
+# for normal brochures — the largest real source seen so far (Crown
+# Estate, 20 pages) is nowhere near this. Checked before any per-page
+# text/table/image extraction is attempted, so a document that would
+# take an unreasonable amount of time/memory to process on the free
+# tier's constraints fails fast with a clear reason instead of a long
+# processing attempt that then still risks a timeout or OOM.
+MAX_PDF_PAGES = 300
+
+
 def _read_pdf(path):
     import pdfplumber
 
@@ -96,6 +106,11 @@ def _read_pdf(path):
         with pdfplumber.open(path) as pdf:
             if not pdf.pages:
                 raise ValueError("PDF has no pages")
+            if len(pdf.pages) > MAX_PDF_PAGES:
+                raise ValueError(
+                    f"PDF has {len(pdf.pages)} pages, exceeding the {MAX_PDF_PAGES}-page limit for processing on "
+                    "this plan — split it into smaller files and process them separately"
+                )
             metadata = pdf.metadata or {}
             # Prefer CreationDate (closer to "when this was actually put
             # together/sent") over ModDate, but take whichever parses.
