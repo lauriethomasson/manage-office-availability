@@ -46,6 +46,29 @@ MIN_IMAGE_BYTES = 3000
 # doesn't cover.
 _LINK_OVERLAP_THRESHOLD = 0.5
 
+# viewings.ehouse.co.uk wraps a Matterport tour behind a login-gated
+# viewer, even though the tour itself is already hosted publicly on
+# Matterport's own domain under the exact same space ID — confirmed
+# empirically (2026-07) for all 3 such links in the Crown Estate example:
+# each https://viewings.ehouse.co.uk/#/matterport/show/<ID> link's own
+# <ID>, fetched directly as https://my.matterport.com/show/?m=<ID>,
+# returned the correct tour (matching page title, e.g. "The Linen Hall -
+# Room 411 - Matterport 3D Showcase") with no login required, while the
+# ehouse.co.uk URL itself hangs on a client-side "Loading..." screen for
+# an anonymous/unauthenticated visitor (its "#/..." fragment is parsed by
+# client-side JS, which then makes its own API call that a bare,
+# unauthenticated link click can't get past). Rewritten here to the
+# direct URL, which points at the identical real tour without the
+# unnecessary login wall.
+_EHOUSE_MATTERPORT_RE = re.compile(r"^https?://viewings\.ehouse\.co\.uk/#/matterport/show/([A-Za-z0-9]+)/?$", re.IGNORECASE)
+
+
+def _normalize_floorplan_url(uri):
+    if not uri:
+        return uri
+    m = _EHOUSE_MATTERPORT_RE.match(uri.strip())
+    return f"https://my.matterport.com/show/?m={m.group(1)}" if m else uri
+
 
 def _rect_overlap_fraction(a, b):
     """Intersection-over-union of two (x0, y0, x1, y1) rects — 0.0 if they
@@ -98,7 +121,7 @@ def _link_uri_for_rect(links, rect):
         overlap = _rect_overlap_fraction(rect, (lrect.x0, lrect.y0, lrect.x1, lrect.y1))
         if overlap > _LINK_OVERLAP_THRESHOLD:
             best_uri = uri
-    return best_uri
+    return _normalize_floorplan_url(best_uri)
 
 
 def scan_pages(path):
