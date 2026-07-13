@@ -22,7 +22,7 @@ _cache = None
 _last_request_at = 0.0
 
 
-def geocode(address):
+def geocode(address, confident=True):
     """Look up (lat, lng, postcode) for a free-text address via Nominatim.
 
     Returns (lat, lng, postcode, error): lat/lng are floats, or None if no
@@ -35,8 +35,28 @@ def geocode(address):
     always just leave Lat/Lng/postcode blank on error rather than guessing).
 
     Results are cached on disk keyed by the normalized address string, so
-    the same building is never re-geocoded across runs.
-    """
+    the same building is never re-geocoded across runs — except as
+    described below for confident=False.
+
+    confident: False for a low-confidence, last-resort lookup — currently
+    just extraction.pipeline._geocode_records' bare-building-name
+    fallback tier, tried only when neither a full address nor a
+    web-search-grounded one was available. A bare name is inherently
+    unreliable even when Nominatim does return a match (confirmed
+    empirically, twice, on real sources — see that function's own
+    docstring), so a confident=False call's cache entry is marked
+    low_confidence and is never trusted as-is on a future lookup: the
+    fetch is always redone (and the cache entry refreshed with whatever
+    the fresh attempt found). Confirmed this gap was real, not
+    theoretical — testing GPE while Gemini's quota was exhausted made the
+    web-search tier fail every time, so every call fell through to this
+    bare-name tier, and its cached answer (also wrong, same as before)
+    was then trusted permanently, silently re-poisoning the cache the
+    exact same way once already fixed. A cache entry written by a
+    confident=True call (the default — a full address from the source
+    text, a spelled-out house number, or a web-search-found address) is
+    never affected by this and is still trusted forever, same as before
+    this parameter existed."""
     address = (address or "").strip()
     if not address:
         return None, None, "", "No address to geocode"
@@ -45,10 +65,15 @@ def geocode(address):
     key = _cache_key(address)
     if key in cache:
         hit = cache[key]
-        return hit.get("lat"), hit.get("lng"), hit.get("postcode", ""), hit.get("error")
+        if confident or not hit.get("low_confidence"):
+            return hit.get("lat"), hit.get("lng"), hit.get("postcode", ""), hit.get("error")
+        # else: both this call and the cached entry are low-confidence —
+        # don't trust it, fall through to a fresh fetch below.
 
     lat, lng, postcode, error = _fetch(address)
     cache[key] = {"lat": lat, "lng": lng, "postcode": postcode, "error": error}
+    if not confident:
+        cache[key]["low_confidence"] = True
     _save_cache(cache)
     return lat, lng, postcode, error
 

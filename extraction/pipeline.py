@@ -200,8 +200,15 @@ def _geocode_records(records, filename, provider_name):
                 # not enough independent sources, or genuinely not found)
                 # — last resort: Nominatim on just the bare name. Same
                 # risk as before (a coincidental match elsewhere), so
-                # still flagged if it does find something.
-                lat, lng, geo_postcode, error = geocode(query)
+                # still flagged if it does find something. confident=False
+                # so this specific result is never trusted from cache on a
+                # future run (extraction.geocode.geocode) — otherwise a
+                # run where the web-search tier fails for a transient
+                # reason (e.g. quota exhaustion) permanently poisons the
+                # cache with this tier's own coincidental-match risk,
+                # exactly like the bug this same safeguard already fixed
+                # once for extraction.address_lookup's own cache.
+                lat, lng, geo_postcode, error = geocode(query, confident=False)
                 if lat is not None:
                     derived_note = True
         else:

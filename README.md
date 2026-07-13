@@ -179,6 +179,19 @@ compatibility (matching the "Loader" sheet of
   3. Only if that finds nothing: Nominatim on just the bare building name
      + "London, UK", as a last resort — same risk as tier 2's justification.
 
+  Tier 3's own result is never trusted from cache (`extraction/geocode.py`'s
+  `geocode(..., confident=False)`) — confirmed (2026-07) that testing GPE
+  while Gemini's grounding quota was exhausted made tier 2 fail every
+  time, so every lookup fell through to tier 3, and its cached (also
+  wrong) answer then got trusted permanently — silently re-poisoning the
+  cache the exact same way once already fixed, just via a different cache
+  file than the one that was cleared. A `confident=False` call's cache
+  entry is marked `low_confidence` and is never treated as authoritative
+  on a future lookup — the fetch is always redone — the same "final vs
+  retriable" distinction `address_lookup.py`'s own cache already made for
+  tier 2, extended to tier 3. Tiers 1/2's own results are unaffected and
+  still cached/trusted normally forever.
+
   A bare building name (no house number/street) is inherently a weaker
   signal than a full address — not guaranteed unique, and confirmed
   empirically *twice*: BC's "Porters Place" alone (no city qualifier) once
