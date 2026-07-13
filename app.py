@@ -16,7 +16,7 @@ from flask import Flask, Response, abort, jsonify, render_template, request, sen
 load_dotenv()
 
 import storage
-from extraction import address_lookup, geocode as geocode_module, pdf_images
+from extraction import address_lookup, geocode as geocode_module, memlog, pdf_images
 from extraction.naming import make_unique_names
 from extraction.pipeline import process_files
 from spreadsheet import write_xlsx
@@ -176,6 +176,7 @@ def process():
     if not files:
         return jsonify({"error": "No files uploaded"}), 400
 
+    memlog.log("request start")
     _cleanup_old_batches()
     batch_id = uuid.uuid4().hex
     batch_dir = OUTPUT_DIR / batch_id
@@ -268,7 +269,9 @@ def process():
             # when a source PDF has none (e.g. BC) or a listing's building
             # can't be matched to a page.
             if r["method"] == "llm" and source_path.suffix.lower() == ".pdf" and r.get("pages_text"):
+                memlog.log("before image extraction", r["filename"])
                 upload_jobs.extend(_attach_pdf_images(r["records"], source_path, r["pages_text"], batch_dir, batch_id, name))
+                memlog.log("after image extraction", r["filename"])
 
             # Generic, source-agnostic finishing step: any rule (not just
             # PDF ones) can stash a list of real candidate photo URLs on a
@@ -281,7 +284,9 @@ def process():
             # direct link, same as the PDF path above.
             upload_jobs.extend(_finalize_high_res_images(r["records"], batch_dir, batch_id, name))
 
+            memlog.log("before spreadsheet write", r["filename"])
             write_xlsx(batch_dir / r["output_file"], r["records"], sheet_title=name)
+            memlog.log("after spreadsheet write", r["filename"])
 
             # Queued for the background thread below (storage.upload is a
             # no-op returning False if S3_BUCKET etc. aren't configured) so
@@ -315,6 +320,7 @@ def process():
             }
             for r in results
         ]
+        memlog.log("request end, about to return response")
         return jsonify({"batch_id": batch_id, "files": response_files})
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

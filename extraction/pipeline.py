@@ -7,7 +7,7 @@ separate (one output spreadsheet per source file, not one combined master).
 """
 from datetime import date
 
-from . import quota
+from . import memlog, quota
 from .address import extract_postcode, spelled_number_to_digits
 from .address_lookup import find_address as find_address_via_web_search
 from .file_readers import read_file
@@ -46,6 +46,7 @@ def process_files(paths):
             "email_html": None,
             "pages_text": None,
         }
+        memlog.log("before file parsing", filename)
         try:
             content = read_file(path)
         except ValueError as e:
@@ -58,6 +59,7 @@ def process_files(paths):
             result["error"] = f"Unexpected error reading file: {e}"
             results.append(result)
             continue
+        memlog.log("after file parsing", filename)
 
         # An .eml's own HTML body (already parsed by file_readers, not
         # re-rendered) — lets app.py link Link to File at that HTML
@@ -80,19 +82,23 @@ def process_files(paths):
         if raw_records:
             result["method"] = f"rule:{rule_name}"
         else:
+            memlog.log("before LLM call", filename)
             try:
                 raw_records, llm_source_name = extract_with_llm(content["text"], source_hint=filename)
                 result["method"] = "llm"
             except LLMExtractionError as e:
+                memlog.log("after LLM call (raised LLMExtractionError)", filename)
                 result["status"] = "error"
                 result["error"] = str(e)
                 results.append(result)
                 continue
             except Exception as e:
+                memlog.log("after LLM call (raised unexpected exception)", filename)
                 result["status"] = "error"
                 result["error"] = f"Unexpected error during LLM extraction: {e}"
                 results.append(result)
                 continue
+            memlog.log("after LLM call", filename)
 
         normalized = [normalize_record(r) for r in raw_records]
         normalized = [r for r in normalized if r.get("Building") or r.get("Area")]
