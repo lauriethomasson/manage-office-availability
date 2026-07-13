@@ -4,10 +4,14 @@ building, with a repeating footer block (Building name/Street/"London"/
 Postcode) on most pages and one or more "Proposed space" sections giving
 the actual floor/unit details.
 
-Floor Plan/High Res Images aren't handled here — same as every other
-LLM-fallback PDF source, those come from app.py's extraction.pdf_images
+Floor Plan/High Res Images aren't handled here — same as the LLM fallback
+this rule replaces, those come from app.py's extraction.pdf_images
 enrichment (position-based real image extraction), which runs for this
-rule too (see app.py's _attach_pdf_images call-site)."""
+rule too (see app.py's PDF_IMAGE_ENRICHED_METHODS / _attach_pdf_images
+call-site) — never invented from this brochure's own text, since a real
+BC brochure once had the LLM copy a plain "Example Floorplan" heading
+into Floor Plan as an unclickable placeholder; this rule can't repeat
+that mistake because it never touches those two fields at all."""
 import re
 
 # The repeating footer block seen on most pages, e.g.:
@@ -75,6 +79,17 @@ def _building(text):
 
 
 def _contact(text):
+    """Returns whatever this brochure's own "Contact: <...>" line says,
+    verbatim (e.g. "Sales") — not just an individual's name. Carries over
+    the same fallback the LLM prompt was given for Crown Estate's sole-
+    agent case: when a source names no individual person but does give a
+    company/team acting as the contact, use that instead of leaving the
+    field blank. Here that isn't a fallback branch at all — this always
+    takes whatever the source's own Contact line says, whether that's a
+    person's name or a team label like "Sales", so the same outcome (a
+    real value, not blank, whenever the source has ANY contact signal)
+    falls out directly rather than needing a special case. Returns ""
+    only when the source has no "Contact:" line at all."""
     m = _CONTACT_RE.search(text)
     return m.group(1).strip() if m else ""
 

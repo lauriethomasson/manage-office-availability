@@ -12,9 +12,13 @@ from .hard_timeout import call_with_timeout
 from .schema import LLM_FIELDS
 
 # Beyond the visible spreadsheet columns in LLM_FIELDS, also ask for a raw
-# sale-price signal — some sources (e.g. BC) list a genuine per-listing
-# sale price alongside their rental price; schema.normalize_record uses
-# this to set "For Sale" instead of hardcoding it. Not a spreadsheet
+# sale-price signal — some sources list a genuine per-listing sale price
+# alongside their rental price (originally found on BC's own "Current
+# Availability" table, which now has its own dedicated rule —
+# extraction.rules.bc — and reads this same signal directly from its own
+# Sale Price column instead of through this prompt; kept here too for any
+# other LLM-fallback source with the same pattern). schema.normalize_record
+# uses this to set "For Sale" instead of hardcoding it. Not a spreadsheet
 # column itself, so it's kept separate from LLM_FIELDS/schema.COLUMNS.
 EXTRA_FIELDS = ["Sale Price"]
 ALL_FIELDS = LLM_FIELDS + EXTRA_FIELDS
@@ -148,14 +152,15 @@ def extract_with_llm(text, source_hint=""):
             # extraction didn't go wrong, Gemini's free-tier daily quota
             # for this model is simply used up for today. Framed
             # per-file/scoped (never "the app is down") since a
-            # rule-based source (Knotel/MetSpace/GPE/Kitts) never reaches
-            # this code path at all and keeps processing normally in the
-            # same batch.
+            # rule-based source (Knotel/MetSpace/GPE/Kitts/BC/Breezblok)
+            # never reaches this code path at all and keeps processing
+            # normally in the same batch.
             raise LLMExtractionError(
                 quota.reset_message("Gemini's daily AI-extraction limit")
                 + " This file needs the AI fallback because no known-provider parser "
-                "(Knotel, MetSpace, GPE, Kitts) recognized its layout — files that DO "
-                "match one of those aren't affected and will still process normally."
+                "(Knotel, MetSpace, GPE, Kitts, BC, Breezblok) recognized its layout — "
+                "files that DO match one of those aren't affected and will still "
+                "process normally."
             )
         is_auth_error = (
             code in (401, "401", 403, "403")

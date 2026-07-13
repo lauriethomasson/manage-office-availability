@@ -26,7 +26,38 @@ single-word keywords like "floor"/"size"/"desk" match both formats, and
 detect() instead requires BC's own genuinely distinctive column combination
 — "Num of Desks" and "Sale Price" together, neither of which appears in
 Kitt's or any other known source's header — so it can't fire on a
-different, differently-labeled tabular source."""
+different, differently-labeled tabular source.
+
+Carries over two behaviors that were previously specific to BC's own
+LLM-fallback extraction (before this table got its own rule), so the
+switch to direct parsing doesn't regress either one:
+
+- For Sale / Sale Price: the LLM prompt used to tell the model to read
+  this table's own real "Sale Price!" column value (blank/"N/A" vs a
+  genuine price) rather than ever inferring a sale price from the rental
+  "Market Price" column. Reading it directly here is strictly more
+  reliable than that ever was — this is BC's real, printed column value,
+  not a value an LLM had to correctly notice and transcribe. Untouched:
+  schema.normalize_record's own "For Sale" derivation (real value -> Yes,
+  ""/"N/A"/etc -> No) already does the right thing with whatever raw
+  string ends up in the "Sale Price" key below, same as it always has.
+
+- No Contacts, Floor Plan, or High Res Images keyword mapped: confirmed
+  by direct inspection that this table genuinely has no contact/agent
+  column and no images at all (a single flat text table, 0 embedded
+  images) — there is no company/agency name to fall back to here the way
+  the LLM prompt's Contacts rule does for other sources (e.g. Crown
+  Estate's "sole agents" line) when no individual is named, because BC's
+  own table has no contact signal of any kind to fall back to. If a
+  future version of this table DOES add a contacts column, map it here
+  directly (using the company/agency name when no individual person is
+  given, not left blank) rather than leaving this rule blind to it.
+  Floor Plan/High Res Images are deliberately never sourced from this
+  table's own text either way — real links only ever come from app.py's
+  extraction.pdf_images enrichment (see PDF_IMAGE_ENRICHED_METHODS),
+  which is exactly the fix already in place for the LLM fallback after a
+  real BC brochure once had the model copy a plain "Example Floorplan"
+  heading into Floor Plan as an unclickable placeholder."""
 
 KEYWORDS = {
     "Building": [["building"]],
@@ -36,6 +67,10 @@ KEYWORDS = {
     # An exact phrase, not ["market", "price"] as two independent words —
     # the latter also matches "Marketing Price...", Kitt's own column name.
     "Marketing Price (Based on Min Term) PCM": [["market price"]],
+    # Feeds schema.normalize_record's "For Sale" derivation directly from
+    # this table's own real value — "Yes" only when it's a genuine price,
+    # "No" for "N/A"/blank — never inferred from the rental price. See
+    # the module docstring for why this replaces the old LLM-prompt rule.
     "Sale Price": [["sale price"]],
     "State of Space": [["available"]],
     "Special Features": [["includes"]],
