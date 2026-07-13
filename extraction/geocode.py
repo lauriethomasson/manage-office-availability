@@ -150,3 +150,28 @@ def flush_to_storage():
     import storage
 
     storage.upload(STORAGE_KEY, CACHE_PATH)
+
+
+def invalidate(substring):
+    """Removes every cached entry whose address key contains `substring`
+    (case-insensitive) — from the in-memory cache this process is
+    currently using, local disk, and the S3 mirror, in that order. Exists
+    so a fix to geocoding/address-lookup logic isn't silently masked by a
+    stale answer cached before the fix existed, without needing to
+    hand-edit the cache file (locally, or the S3 copy via a bucket
+    console) or wait for a redeploy — mutating the already-loaded `_cache`
+    global directly (rather than only rewriting disk/S3 and leaving a
+    running process's own copy untouched) is what actually clears it for
+    the very next request this same worker handles. Returns the list of
+    keys actually removed (empty if nothing matched)."""
+    cache = _load_cache()
+    needle = (substring or "").strip().lower()
+    if not needle:
+        return []
+    removed = [k for k in cache if needle in k]
+    for k in removed:
+        del cache[k]
+    if removed:
+        _save_cache(cache)
+        flush_to_storage()
+    return removed

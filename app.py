@@ -115,6 +115,61 @@ def version():
     return jsonify({"commit": commit, "commit_short": commit[:7]})
 
 
+@app.route("/api/cache/invalidate", methods=["GET", "POST"])
+def cache_invalidate():
+    """Removes cached geocode/address-lookup entries by building-name
+    substring — the fix for the exact pain this app has hit repeatedly: a
+    fix to geocoding/address-lookup logic can be completely correct and
+    still keep producing the old wrong output, because the stale answer
+    is served from cache before the new code ever runs. Before this
+    existed, clearing a poisoned entry meant hand-editing the on-disk
+    cache file directly, then separately editing the B2/S3-mirrored copy
+    (via its own dashboard) so a Render redeploy didn't just pull the
+    stale copy right back down, and finally restarting the Render service
+    so the currently-running worker's own in-memory copy (loaded once,
+    on first use, and never re-read from disk/S3 afterward) picked up
+    the change at all. Calling this endpoint on the live app does all
+    three at once, including the in-memory piece specifically *because*
+    it runs inside that same worker process — no redeploy/restart
+    needed. (That last part relies on this app running as a single
+    gunicorn worker, per Procfile/render.yaml; with multiple workers a
+    request here would only clear the one worker that happened to handle
+    it.)
+
+    GET or POST, query string or form field: ?building=<substring>
+    (case-insensitive, matched against both caches' keys — geocode's
+    "<address>, london, uk" and address_lookup's "<building>|<provider>").
+    Add &dry_run=1 to preview what would be removed without changing
+    anything, e.g. to sanity-check a substring isn't broader than
+    intended before actually deleting."""
+    building = (request.values.get("building") or "").strip()
+    if not building:
+        return jsonify({"error": "missing required 'building' parameter"}), 400
+    dry_run = request.values.get("dry_run", "").lower() in ("1", "true", "yes")
+
+    from extraction import address_lookup, geocode as geocode_module
+
+    if dry_run:
+        needle = building.lower()
+        geo_cache = geocode_module._load_cache()
+        addr_cache = address_lookup._load_cache()
+        geo_matches = [k for k in geo_cache if needle in k]
+        addr_matches = [k for k in addr_cache if needle in k]
+    else:
+        geo_matches = geocode_module.invalidate(building)
+        addr_matches = address_lookup.invalidate(building)
+
+    return jsonify(
+        {
+            "building": building,
+            "dry_run": dry_run,
+            "geocode_cache": geo_matches,
+            "address_lookup_cache": addr_matches,
+            "total_matched": len(geo_matches) + len(addr_matches),
+        }
+    )
+
+
 @app.route("/api/process", methods=["POST"])
 def process():
     files = request.files.getlist("files")

@@ -205,6 +205,37 @@ compatibility (matching the "Loader" sheet of
   re-checking if this starts failing later — Google's model/quota lineup
   for grounding shifts over time.
 
+### Clearing a stale/wrong cached lookup
+
+A fix to geocoding or address-lookup logic can be completely correct and
+still keep producing the old wrong output, because the previous (wrong)
+answer is already cached — locally, in the S3/B2 mirror, and in the
+memory of whichever worker process is currently running. `GET`/`POST
+/api/cache/invalidate` (token-protected, same as every other `/api/`
+route) fixes all three at once, since it runs inside the live app itself:
+
+```
+curl "https://<your-app>/api/cache/invalidate?building=elsley&token=<ACCESS_TOKEN>"
+```
+
+- `building` (required): a case-insensitive substring matched against
+  both caches' keys — `extraction.geocode`'s `"<address>, london, uk"`
+  and `extraction.address_lookup`'s `"<building>|<provider>"`. Removes
+  every match from the in-memory cache, local disk, and the S3 mirror.
+- `dry_run=1`: preview which keys would be removed without changing
+  anything — worth a quick check first that a substring isn't broader
+  than intended (e.g. `building=house` would match every building whose
+  name contains "house").
+
+Response reports exactly which keys were matched in each cache. Because
+this mutates the already-loaded cache inside the running process, it
+also fixes the "worker already has the stale answer in memory" problem
+that a redeploy alone doesn't (a redeploy just pulls the same stale S3
+copy back down) — no restart needed. That relies on this app running as
+a single gunicorn worker (see `Procfile`/`render.yaml`); with multiple
+workers, one call here would only clear whichever worker happened to
+handle that request.
+
 ## Adding a new source
 
 If a new sender's emails consistently fail to a rule and always land on

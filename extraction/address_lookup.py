@@ -323,3 +323,27 @@ def flush_to_storage():
     import storage
 
     storage.upload(STORAGE_KEY, CACHE_PATH)
+
+
+def invalidate(substring):
+    """Removes every cached entry whose "building|provider" key contains
+    `substring` (case-insensitive) — from the in-memory cache this process
+    is currently using, local disk, and the S3 mirror, in that order. See
+    extraction.geocode.invalidate for why mutating the already-loaded
+    `_cache` global matters, not just rewriting disk/S3: a long-running
+    worker process only reads this cache from disk/S3 once, on first use,
+    so a fix here is what actually stops the *current* process from
+    continuing to serve a stale answer, without waiting for a
+    redeploy/restart.
+    Returns the list of keys actually removed (empty if nothing matched)."""
+    cache = _load_cache()
+    needle = (substring or "").strip().lower()
+    if not needle:
+        return []
+    removed = [k for k in cache if needle in k]
+    for k in removed:
+        del cache[k]
+    if removed:
+        _save_cache(cache)
+        flush_to_storage()
+    return removed
