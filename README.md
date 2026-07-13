@@ -464,18 +464,45 @@ regardless, so nothing here is meant to persist long-term.
   but a worker blocked in a low-level, uninterruptible SSL socket read
   can't be stopped that way, so gunicorn eventually has to escalate to a
   raw SIGKILL, which is exactly what got misreported as "Perhaps out of
-  memory?" every time. Fixed with an explicit `http_options=types.
-  HttpOptions(timeout=...)` on both Gemini call sites — 60s for
-  `extraction/llm_fallback.py`'s single extraction call, 25s per attempt
-  for `extraction/address_lookup.py`'s grounding call (smaller since that
-  one can retry up to `MAX_EMPTY_METADATA_RETRIES` times per lookup) —
-  both comfortably under gunicorn's 120s, so a hang now fails fast with a
-  normal, catchable exception (a clear per-file "timed out" message,
-  never a crash) instead of taking the worker down with it. The memory
-  work above wasn't wasted — `pdf_images.py`'s page-by-page bound and the
-  backgrounded cache flush are both real, legitimate fixes for real (if
-  not, on their own, *this* crash's) risks — but the timeout was the
-  actual answer for this specific, repeatedly-reported symptom.
+  memory?" every time.
+
+  First attempt: an explicit `http_options=types.HttpOptions(timeout=...)`
+  on both Gemini calls. Confirmed via a second real Render crash that this
+  *alone* wasn't enough — gunicorn's own `[CRITICAL] WORKER TIMEOUT`
+  (120s) fired anyway, meaning the call was still blocked well past the
+  configured `http_options` timeout. Verified empirically (a 1ms
+  `http_options.timeout` against the real API failed almost instantly, so
+  the mechanism itself isn't broken) that httpx's `timeout` bounds the gap
+  *between* chunks of data arriving, not the call's total duration — a
+  large response (this app's extraction call asks for up to
+  `MAX_OUTPUT_TOKENS`, 24000) can keep trickling data slowly enough that
+  no single inter-chunk gap ever exceeds the configured timeout, while the
+  *total* call still runs far longer than it.
+
+  Real fix: `extraction/hard_timeout.py`'s `call_with_timeout` runs the
+  Gemini call in a background thread and enforces a true, independent
+  wall-clock deadline via `concurrent.futures.Future.result(timeout=...)`
+  — 60s for `extraction/llm_fallback.py`'s single extraction call, 25s per
+  attempt for `extraction/address_lookup.py`'s grounding call (smaller
+  since that one can retry up to `MAX_EMPTY_METADATA_RETRIES` times per
+  lookup) — both comfortably under gunicorn's 120s. This doesn't depend on
+  the callee's own timeout semantics at all, so it can't be defeated the
+  same way: verified with a mocked call that sleeps for 10 minutes and
+  completely ignores `http_options` — the outer deadline still fires
+  exactly on schedule. (There's no safe way to force-kill a thread blocked
+  in a C-level socket read, so a timed-out call may keep running in the
+  background afterward; `call_with_timeout` explicitly uses
+  `executor.shutdown(wait=False)`, not a `with` block, so this function
+  itself returns immediately either way rather than blocking on exactly
+  the hang it exists to avoid.) A hang now fails fast with a normal,
+  catchable exception — a clear per-file "timed out" message, never a
+  crash — instead of taking the worker down with it.
+
+  The memory work earlier in this list wasn't wasted — `pdf_images.py`'s
+  page-by-page bound and the backgrounded cache flush are both real,
+  legitimate fixes for real (if not, on their own, *this* crash's) risks —
+  but the timeout was the actual answer for this specific,
+  repeatedly-reported symptom.
 
 ### Persistent storage (optional)
 

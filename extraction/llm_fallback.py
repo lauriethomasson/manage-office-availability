@@ -8,6 +8,7 @@ import os
 import re
 
 from . import quota
+from .hard_timeout import call_with_timeout
 from .schema import LLM_FIELDS
 
 # Beyond the visible spreadsheet columns in LLM_FIELDS, also ask for a raw
@@ -43,6 +44,12 @@ MAX_OUTPUT_TOKENS = 24000  # a 17-field JSON schema repeated per listing adds
 # up fast — a ~40-listing document needs well over the old 4000-token budget.
 # The model's ceiling is 65536; this leaves comfortable headroom for larger ones.
 
+# Hard wall-clock deadline (extraction.hard_timeout), comfortably under
+# gunicorn's own 120s worker timeout — see call_with_timeout below for why
+# google-genai's own http_options.timeout isn't enough on its own for a
+# large-output call like this one.
+CALL_TIMEOUT_SECONDS = 60
+
 
 class LLMExtractionError(Exception):
     pass
@@ -77,31 +84,45 @@ def extract_with_llm(text, source_hint=""):
         # producing a 401 ACCESS_TOKEN_TYPE_UNSUPPORTED error that has
         # nothing to do with whether GEMINI_API_KEY itself is valid.
         client = genai.Client(api_key=api_key, vertexai=False)
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=MAX_OUTPUT_TOKENS,
-                response_mime_type="application/json",
-                # Keep the token budget for the actual JSON response, not
-                # hidden reasoning — max_output_tokens caps both combined.
-                thinking_config=types.ThinkingConfig(thinking_level="low"),
-                # Confirmed via a real Render crash log (2026-07): with no
-                # timeout set here, google-genai's own httpx client has none
-                # either, so a slow/hanging network path to Google's API
-                # blocks this call — and this whole worker — indefinitely.
-                # gunicorn's own --timeout tries to abort a stuck worker via
-                # a signal, but a worker blocked in a low-level SSL socket
-                # read (confirmed from the actual traceback: stuck in
-                # ssl.py's recv, deep inside httpx/httpcore) can't be
-                # interrupted cleanly that way, so gunicorn eventually has
-                # to escalate to a raw SIGKILL — logged as "Perhaps out of
-                # memory?" regardless of the real cause. An explicit,
-                # well-under-gunicorn's-120s timeout here means a hang fails
-                # fast with a normal, catchable exception instead.
-                http_options=types.HttpOptions(timeout=60_000),
-            ),
-        )
+
+        def _call():
+            return client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                    response_mime_type="application/json",
+                    # Keep the token budget for the actual JSON response,
+                    # not hidden reasoning — max_output_tokens caps both
+                    # combined.
+                    thinking_config=types.ThinkingConfig(thinking_level="low"),
+                    # Also set, but confirmed (2026-07, via a real Render
+                    # crash) NOT sufficient on its own for a large-output
+                    # call like this one — see call_with_timeout below for
+                    # the actual enforcement. Kept as a reasonable inner
+                    # hint/backup; doesn't hurt.
+                    http_options=types.HttpOptions(timeout=CALL_TIMEOUT_SECONDS * 1000),
+                ),
+            )
+
+        # Confirmed via a real Render crash log (2026-07) that http_options.
+        # timeout above, on its own, did NOT stop this from hanging past
+        # gunicorn's own 120s worker timeout — verified empirically
+        # (a 1ms http_options.timeout against the real API failed almost
+        # instantly, so the mechanism itself works) that httpx's timeout
+        # bounds the gap *between* chunks of data arriving, not the total
+        # call duration: a large response (this call asks for up to
+        # MAX_OUTPUT_TOKENS) can keep trickling data slowly enough that no
+        # single inter-chunk gap ever exceeds the configured timeout, while
+        # the call's *total* duration still runs far longer than it. A
+        # worker blocked that way in a low-level SSL socket read (confirmed
+        # from the actual crash traceback: stuck in ssl.py's recv, deep
+        # inside httpx/httpcore) can't be interrupted cleanly by gunicorn's
+        # own signal-based --timeout either, so gunicorn eventually has to
+        # escalate to a raw SIGKILL — logged as "Perhaps out of memory?"
+        # regardless of the real cause. call_with_timeout enforces a true,
+        # independent wall-clock deadline on the whole call instead.
+        response = call_with_timeout(_call, CALL_TIMEOUT_SECONDS)
     except Exception as e:
         # Check for an auth/permission failure defensively (by status code,
         # not by exception class) — a previous version only caught

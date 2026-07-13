@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import quota
+from .hard_timeout import call_with_timeout
 
 # Confirmed empirically (2026-07) that Google Search grounding returns
 # 429 RESOURCE_EXHAUSTED on this project's free tier for both
@@ -64,6 +65,14 @@ MAX_EMPTY_METADATA_MISSES = 3
 # resolves this most of the time given how often the very next attempt
 # for the same query comes back with real citations.
 MAX_EMPTY_METADATA_RETRIES = 3
+
+# Hard wall-clock deadline per attempt (extraction.hard_timeout) — see
+# extraction.llm_fallback's own CALL_TIMEOUT_SECONDS for why google-genai's
+# http_options.timeout isn't enough on its own. Smaller than that one
+# since this call can happen up to MAX_EMPTY_METADATA_RETRIES times per
+# lookup — worst case ~75s across all attempts, still comfortably under
+# gunicorn's 120s.
+CALL_TIMEOUT_SECONDS = 25
 
 
 def find_address(building_name, provider_name=None, context_hint="a commercial office building in London, UK"):
@@ -197,30 +206,36 @@ def _search(building_name, provider_name, context_hint):
 
     client = genai.Client(api_key=api_key, vertexai=False)
 
+    def _call():
+        return client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            # No thinking_config here — gemini-2.5-flash rejects
+            # thinking_level (that param is for the newer 3.x models used
+            # elsewhere in this repo); this model's defaults are fine for
+            # a short lookup like this.
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                # Also set, but confirmed (2026-07, via a real Render
+                # crash on extraction.llm_fallback's own equivalent call)
+                # NOT sufficient on its own for a call whose response can
+                # keep trickling data slowly — see call_with_timeout below
+                # for the actual enforcement. Kept as a reasonable inner
+                # hint/backup; doesn't hurt.
+                http_options=types.HttpOptions(timeout=CALL_TIMEOUT_SECONDS * 1000),
+            ),
+        )
+
     for attempt in range(1, MAX_EMPTY_METADATA_RETRIES + 1):
         try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=prompt,
-                # No thinking_config here — gemini-2.5-flash rejects
-                # thinking_level (that param is for the newer 3.x models used
-                # elsewhere in this repo); this model's defaults are fine for
-                # a short lookup like this.
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    # See extraction.llm_fallback's own http_options for why
-                    # this matters: without an explicit timeout, a slow/
-                    # hanging network path can block this call — and the
-                    # whole worker — indefinitely, in a way gunicorn's own
-                    # timeout can't cleanly interrupt (confirmed via a real
-                    # Render crash log stuck deep in a blocking SSL socket
-                    # read). Smaller than llm_fallback's 60s since this call
-                    # can retry up to MAX_EMPTY_METADATA_RETRIES times
-                    # within one request — worst case ~75s across all 3,
-                    # still comfortably under gunicorn's 120s.
-                    http_options=types.HttpOptions(timeout=25_000),
-                ),
-            )
+            # Hard, independent wall-clock deadline per attempt — see
+            # extraction.llm_fallback's own call_with_timeout usage for why
+            # http_options.timeout alone isn't enough: a worker blocked in
+            # a low-level SSL socket read can't be interrupted cleanly by
+            # gunicorn's own signal-based timeout, so an unbounded hang
+            # here would eventually SIGKILL the whole worker, logged as
+            # "Perhaps out of memory?" regardless of the real cause.
+            response = call_with_timeout(_call, CALL_TIMEOUT_SECONDS)
         except Exception as e:
             # A quota error (429), a network failure, etc. — not a real
             # answer, so not cacheable; the caller should be free to retry
