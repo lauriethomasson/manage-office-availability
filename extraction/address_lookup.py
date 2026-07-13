@@ -206,7 +206,20 @@ def _search(building_name, provider_name, context_hint):
                 # thinking_level (that param is for the newer 3.x models used
                 # elsewhere in this repo); this model's defaults are fine for
                 # a short lookup like this.
-                config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())]),
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    # See extraction.llm_fallback's own http_options for why
+                    # this matters: without an explicit timeout, a slow/
+                    # hanging network path can block this call — and the
+                    # whole worker — indefinitely, in a way gunicorn's own
+                    # timeout can't cleanly interrupt (confirmed via a real
+                    # Render crash log stuck deep in a blocking SSL socket
+                    # read). Smaller than llm_fallback's 60s since this call
+                    # can retry up to MAX_EMPTY_METADATA_RETRIES times
+                    # within one request — worst case ~75s across all 3,
+                    # still comfortably under gunicorn's 120s.
+                    http_options=types.HttpOptions(timeout=25_000),
+                ),
             )
         except Exception as e:
             # A quota error (429), a network failure, etc. — not a real

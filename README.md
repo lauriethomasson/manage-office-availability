@@ -444,6 +444,39 @@ regardless, so nothing here is meant to persist long-term.
   `app.py`'s `_flush_caches`) so it can never block the HTTP response or
   contribute to a worker timeout.
 
+  **None of the above turned out to be the actual root cause of Crown
+  Estate's own repeated SIGKILL.** Every local memory measurement of that
+  exact file — before and after each fix above — stayed around ~200MB,
+  nowhere near 512MB, and the crash kept recurring on Render regardless.
+  Added `extraction/memlog.py` (real RSS via `psutil`, logged at each
+  processing stage with an immediate `stdout` flush so a checkpoint isn't
+  lost to buffering right before a kill) to get real numbers from the
+  real server instead of continuing to guess from a local environment
+  that clearly wasn't reproducing it. The actual Render crash log then
+  showed a real Python traceback, not just the generic SIGKILL message:
+  the worker was blocked inside `ssl.py`'s `recv()`, deep in `httpx`/
+  `httpcore`, waiting on a network read **from Gemini's own API** — the
+  `[memlog]` trail confirmed it, stalling forever right after "before LLM
+  call" with no "after" ever logged. **`google-genai`'s HTTP client had no
+  request timeout configured**, so a slow/hanging network path to
+  Google's API blocked the call — and the whole worker — indefinitely.
+  gunicorn's own `--timeout` tries to abort a stuck worker via a signal,
+  but a worker blocked in a low-level, uninterruptible SSL socket read
+  can't be stopped that way, so gunicorn eventually has to escalate to a
+  raw SIGKILL, which is exactly what got misreported as "Perhaps out of
+  memory?" every time. Fixed with an explicit `http_options=types.
+  HttpOptions(timeout=...)` on both Gemini call sites — 60s for
+  `extraction/llm_fallback.py`'s single extraction call, 25s per attempt
+  for `extraction/address_lookup.py`'s grounding call (smaller since that
+  one can retry up to `MAX_EMPTY_METADATA_RETRIES` times per lookup) —
+  both comfortably under gunicorn's 120s, so a hang now fails fast with a
+  normal, catchable exception (a clear per-file "timed out" message,
+  never a crash) instead of taking the worker down with it. The memory
+  work above wasn't wasted — `pdf_images.py`'s page-by-page bound and the
+  backgrounded cache flush are both real, legitimate fixes for real (if
+  not, on their own, *this* crash's) risks — but the timeout was the
+  actual answer for this specific, repeatedly-reported symptom.
+
 ### Persistent storage (optional)
 
 Without this, `Link to File` (and the generated spreadsheet's own

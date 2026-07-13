@@ -86,6 +86,20 @@ def extract_with_llm(text, source_hint=""):
                 # Keep the token budget for the actual JSON response, not
                 # hidden reasoning — max_output_tokens caps both combined.
                 thinking_config=types.ThinkingConfig(thinking_level="low"),
+                # Confirmed via a real Render crash log (2026-07): with no
+                # timeout set here, google-genai's own httpx client has none
+                # either, so a slow/hanging network path to Google's API
+                # blocks this call — and this whole worker — indefinitely.
+                # gunicorn's own --timeout tries to abort a stuck worker via
+                # a signal, but a worker blocked in a low-level SSL socket
+                # read (confirmed from the actual traceback: stuck in
+                # ssl.py's recv, deep inside httpx/httpcore) can't be
+                # interrupted cleanly that way, so gunicorn eventually has
+                # to escalate to a raw SIGKILL — logged as "Perhaps out of
+                # memory?" regardless of the real cause. An explicit,
+                # well-under-gunicorn's-120s timeout here means a hang fails
+                # fast with a normal, catchable exception instead.
+                http_options=types.HttpOptions(timeout=60_000),
             ),
         )
     except Exception as e:
@@ -99,6 +113,15 @@ def extract_with_llm(text, source_hint=""):
         # tells us exactly what to catch instead of us guessing again.
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
         err_text = str(e)
+        if "timeout" in type(e).__name__.lower() or "timeout" in err_text.lower():
+            # The http_options timeout above tripped — a slow/hanging
+            # network path, not necessarily anything wrong with the
+            # request itself. Distinct message so this reads as "safe to
+            # just retry", not a real extraction failure.
+            raise LLMExtractionError(
+                f"Gemini API call timed out without a response ({type(e).__module__}.{type(e).__name__}) "
+                "— likely a slow network path rather than a problem with this file. Safe to retry."
+            )
         if quota.is_quota_exceeded(e):
             # Distinct from every other failure below: this file's own
             # extraction didn't go wrong, Gemini's free-tier daily quota
