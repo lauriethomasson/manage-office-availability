@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import quota
+
 # Confirmed empirically (2026-07) that Google Search grounding returns
 # 429 RESOURCE_EXHAUSTED on this project's free tier for both
 # gemini-3.1-flash-lite and gemini-2.0-flash (used elsewhere in this repo
@@ -50,15 +52,21 @@ MAX_EMPTY_METADATA_MISSES = 3
 
 
 def find_address(building_name, provider_name=None, context_hint="a commercial office building in London, UK"):
-    """Best-effort: returns (address_or_none, sources) — address is a
-    plain address string found via a real web search, or None if
-    unconfigured, fewer than MIN_INDEPENDENT_SOURCES independent sources
-    backed it, the model couldn't confidently find one, or any error
-    occurred. sources is the list of distinct source sites (domain, or
-    page title when a real domain isn't resolvable from the grounding
+    """Best-effort: returns (address_or_none, sources, quota_exhausted).
+    address is a plain address string found via a real web search, or
+    None if unconfigured, fewer than MIN_INDEPENDENT_SOURCES independent
+    sources backed it, the model couldn't confidently find one, or any
+    error occurred. sources is the list of distinct source sites (domain,
+    or page title when a real domain isn't resolvable from the grounding
     response) the answer was based on — [] whenever address is None.
-    Never raises — this is always an optional last-resort fallback, never
-    something that should fail the batch.
+    quota_exhausted is True specifically when this attempt hit Gemini's
+    429 RESOURCE_EXHAUSTED (never for any other kind of failure, and
+    never True on a cache hit — only a genuine, just-attempted API call
+    can hit a live quota) — extraction.pipeline surfaces this as a
+    per-file note so a batch that falls back further than usual (bare
+    Nominatim instead of a web-search-found address) is explained rather
+    than silently degraded. Never raises — this is always an optional
+    last-resort fallback, never something that should fail the batch.
 
     provider_name (e.g. "GPE", "MetSpace", "Knotel", "Kitts", "BC") is the
     source/broker this listing came from — included in the search so a
@@ -70,7 +78,7 @@ def find_address(building_name, provider_name=None, context_hint="a commercial o
     """
     building_name = (building_name or "").strip()
     if not building_name:
-        return None, []
+        return None, [], False
 
     cache = _load_cache()
     key = f"{building_name.lower()}|{(provider_name or '').strip().lower()}"
@@ -86,7 +94,7 @@ def find_address(building_name, provider_name=None, context_hint="a commercial o
                 # rather than trusting that non-final result forever.
                 pending_misses = entry.get("misses", 0)
             elif status == "final" or entry.get("address") is not None:
-                return entry.get("address"), entry.get("sources") or []
+                return entry.get("address"), entry.get("sources") or [], False
             else:
                 # A pre-fix cache entry: {"address": None, "sources": []}
                 # with no "status" at all. The old code cached this
@@ -101,9 +109,9 @@ def find_address(building_name, provider_name=None, context_hint="a commercial o
         else:
             # Tolerate the oldest cache format (a bare string or null, from
             # before `sources`/`status` were tracked) rather than crashing.
-            return entry, []
+            return entry, [], False
 
-    address, sources, cacheable, flaky = _search(building_name, provider_name, context_hint)
+    address, sources, cacheable, flaky, quota_exhausted = _search(building_name, provider_name, context_hint)
     if cacheable:
         # A genuine, confident answer from the model (found, or a
         # deliberate "not enough sources"/"no address" rejection) — never a
@@ -125,24 +133,27 @@ def find_address(building_name, provider_name=None, context_hint="a commercial o
         else:
             cache[key] = {"status": "flaky", "misses": misses}
         _save_cache(cache)
-    return address, sources
+    return address, sources, quota_exhausted
 
 
 def _search(building_name, provider_name, context_hint):
-    """Returns (address_or_none, sources, cacheable, flaky) — cacheable is False
-    whenever the reason for a None result is transient (should be retried
-    on a future run), True when the model gave a confident, final answer
-    (an address backed by enough sources, or a deliberate rejection)
-    worth remembering."""
+    """Returns (address_or_none, sources, cacheable, flaky, quota_exhausted)
+    — cacheable is False whenever the reason for a None result is
+    transient (should be retried on a future run), True when the model
+    gave a confident, final answer (an address backed by enough sources,
+    or a deliberate rejection) worth remembering. quota_exhausted is True
+    only for the specific 429/RESOURCE_EXHAUSTED case, never for any
+    other kind of failure (network, no key, no chunks) — see
+    extraction.quota.is_quota_exceeded."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return None, [], False, False
+        return None, [], False, False, False
 
     try:
         from google import genai
         from google.genai import types
     except ImportError:
-        return None, [], False, False
+        return None, [], False, False, False
 
     subject = f'a building called "{building_name}"'
     if provider_name:
@@ -175,11 +186,11 @@ def _search(building_name, provider_name, context_hint):
         # answer, so not cacheable; the caller should be free to retry
         # this exact building/provider pair again next time.
         print(f"[address_lookup] web search failed for '{building_name}': {type(e).__name__}: {e}")
-        return None, [], False, False
+        return None, [], False, False, quota.is_quota_exceeded(e)
 
     text = (response.text or "").strip()
     if not text or text.upper().startswith(NOT_FOUND):
-        return None, [], True, False
+        return None, [], True, False, False
 
     # Guard against the model adding anything beyond the single line asked
     # for despite instructions.
@@ -207,7 +218,7 @@ def _search(building_name, provider_name, context_hint):
                 f"metadata had no chunks at all this call (likely API flakiness, not "
                 f"a real rejection) — not caching, will retry on a future run"
             )
-            return None, [], False, True
+            return None, [], False, True, False
         # At least one real chunk came back, just fewer than required — a
         # single thin source is exactly the failure mode that produced
         # three confirmed wrong addresses (Porters Place, Elsley, Kent
@@ -219,9 +230,9 @@ def _search(building_name, provider_name, context_hint):
             f"[address_lookup] rejecting '{address}' for '{building_name}' — only "
             f"{len(sources)} independent source(s) cited (need >= {MIN_INDEPENDENT_SOURCES}): {sources}"
         )
-        return None, sources, True, False
+        return None, sources, True, False, False
 
-    return address, sources, True, False
+    return address, sources, True, False, False
 
 
 def _extract_sources(response):

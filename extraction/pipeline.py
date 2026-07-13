@@ -7,7 +7,7 @@ separate (one output spreadsheet per source file, not one combined master).
 """
 from datetime import date
 
-from . import address_lookup, geocode as geocode_module
+from . import address_lookup, geocode as geocode_module, quota
 from .address import extract_postcode, spelled_number_to_digits
 from .address_lookup import find_address as find_address_via_web_search
 from .file_readers import read_file
@@ -21,8 +21,13 @@ from .schema import normalize_record
 def process_files(paths):
     """Returns a list of per-file dicts:
     {filename, status: "ok"|"error", method: "rule:<Name>"|"llm"|None,
-     records, record_count, error, provider_name, date}
+     records, record_count, error, warning, provider_name, date}
     provider_name/date/records are only meaningful when status == "ok".
+    warning is set alongside a normal "ok" status/None error — a file
+    that extracted successfully but hit Gemini's daily quota partway
+    through its own address-lookup fallback (some rows' Lat/Lng/postcode
+    fell back further than usual, to a less reliable bare-name Nominatim
+    match) rather than something that failed the file itself.
     """
     results = []
 
@@ -35,6 +40,7 @@ def process_files(paths):
             "records": [],
             "record_count": 0,
             "error": None,
+            "warning": None,
             "provider_name": None,
             "date": None,
             "email_html": None,
@@ -100,7 +106,20 @@ def process_files(paths):
         # web-search fallback can pass it along as disambiguating context
         # (e.g. "Elsley GPE Fully Managed" instead of just "Elsley").
         provider_name = resolve_provider_name(rule_name, filename, llm_source_name)
-        _geocode_records(normalized, filename, provider_name)
+        quota_exhausted = _geocode_records(normalized, filename, provider_name)
+        if quota_exhausted:
+            # Scoped to this file's own note, not a batch-wide error — the
+            # file's records extracted fine; this only affects rows whose
+            # address had to fall back to the web-search tier and hit the
+            # daily limit there specifically (a plain building name with
+            # no street/postcode in the source at all — see
+            # _geocode_records below).
+            result["warning"] = (
+                quota.reset_message("Gemini's daily address-search limit")
+                + " Some rows' Property Address/Postcode/Lat/Lng fell back to a plain "
+                "building-name lookup, which is less reliable — worth a manual check "
+                'for any row marked "(Not in source text)".'
+            )
 
         # Prefer the source document's own date (email Date header, or PDF/
         # DOCX metadata) over processing time, so External Ref reflects when
@@ -159,7 +178,14 @@ def _geocode_records(records, filename, provider_name):
     since it reflects a real gap in the source document, not a
     wrong-vs-right judgment on the value itself — it's never used to
     silently overwrite Property Address 1/Building.
+
+    Returns True if the web-search tier hit Gemini's daily quota limit
+    for at least one record in this file — process_files turns this into
+    a per-file "warning" (not "error"; the records themselves still
+    extracted fine) so a batch that had to fall back further than usual
+    is explained rather than silently degraded.
     """
+    quota_exhausted = False
     for record in records:
         building = (record.get("Property Address 1") or "").strip()
         has_digit = any(ch.isdigit() for ch in building)
@@ -177,7 +203,9 @@ def _geocode_records(records, filename, provider_name):
         if is_bare_name:
             lat = lng = geo_postcode = None
             error = None
-            web_address, web_sources = find_address_via_web_search(building, provider_name)
+            web_address, web_sources, hit_quota = find_address_via_web_search(building, provider_name)
+            if hit_quota:
+                quota_exhausted = True
             if web_address:
                 web_query = _geocode_query({"Property Address 1": web_address})
                 lat, lng, geo_postcode, error = geocode(web_query)
@@ -264,6 +292,8 @@ def _geocode_records(records, filename, provider_name):
             prefix = "[geocode] (bare building name, no match found) " if is_bare_name else "[geocode] "
             target = query or building or "(blank)"
             _safe_print(f"{prefix}{filename}: could not geocode '{target}': {error}")
+
+    return quota_exhausted
 
 
 def _safe_print(message):

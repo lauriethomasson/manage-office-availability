@@ -113,13 +113,19 @@ function renderResults(data) {
     const outputCell = f.output_file
       ? `<a class="download-link" href="${downloadUrl}">${escapeHtml(f.output_file)}</a>`
       : "—";
+    // A file can be "ok" (its records extracted fine) and still carry a
+    // warning — e.g. Gemini's daily address-search quota was hit partway
+    // through, so some rows fell back further than usual. error always
+    // wins when both are somehow set (it isn't in practice: pipeline only
+    // ever sets one or the other for a given file).
+    const noteText = f.error || f.warning || "";
     tr.innerHTML = `
       <td>${escapeHtml(f.filename)}</td>
       <td><span class="badge ${badgeClass}">${f.status}</span></td>
       <td class="method">${methodLabel}</td>
       <td>${f.record_count}</td>
       <td>${outputCell}</td>
-      <td class="error-text">${f.error ? escapeHtml(f.error) : ""}</td>`;
+      <td class="error-text">${noteText ? escapeHtml(noteText) : ""}</td>`;
     tbody.appendChild(tr);
   });
 

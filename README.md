@@ -45,6 +45,30 @@ instead (see [Deployment](#deployment-render) for why).
    schema, plus its best guess at the sender/broker name. The response is
    validated before anything is written to a spreadsheet; a malformed or
    empty response is reported as a per-file error, not a crash.
+
+   If Gemini's free-tier daily quota is exhausted (429 RESOURCE_EXHAUSTED),
+   this is caught distinctly from every other failure and reported as a
+   clear, scoped message in that file's own Notes/error cell — e.g.
+   *"Gemini's daily AI-extraction limit has been reached for today. This
+   resets at midnight Pacific Time — 08:00 UK time, in about 21 hours.
+   This file needs the AI fallback because no known-provider parser
+   (Knotel, MetSpace, GPE, Kitts) recognized its layout — files that DO
+   match one of those aren't affected and will still process normally."*
+   — never a raw exception dump, and never implying the whole app/batch
+   is down (`extraction/quota.py`, shared with the address-search quota
+   note below).
+
+   The daily reset time is computed from the real current time (Pacific
+   and UK clocks each observe their own DST on different dates, so this
+   is never hardcoded as "8 hours"), converted to UK time since this
+   app's own audience is UK-based.
+
+   Note: this is a genuinely *separate* Gemini quota from the address-search
+   one below (different model, different daily limit) — a rule-based file
+   (Knotel/MetSpace/GPE/Kitts) never reaches this specific quota at all,
+   but can still carry a warning of its own if the address-search quota
+   (below) is what's exhausted, since that's a per-*building* concern, not
+   tied to which parser matched the file.
 4. **One spreadsheet per file** — each source file gets its own `.xlsx`,
    named after the identified provider:
    - Knotel/MetSpace/GPE emails → `Knotel.xlsx`, `MetSpace.xlsx`, `GPE.xlsx`
@@ -178,6 +202,19 @@ compatibility (matching the "Loader" sheet of
      because a bare name alone isn't trustworthy (see below).
   3. Only if that finds nothing: Nominatim on just the bare building name
      + "London, UK", as a last resort — same risk as tier 2's justification.
+
+  When tier 2 fails specifically because Gemini's daily grounding quota is
+  exhausted (429 RESOURCE_EXHAUSTED), the file this building belongs to
+  still processes normally (status stays "ok", every record still
+  extracted) — it just carries a per-file warning noting that some rows
+  fell back further than usual, with the same reset-time note as the
+  LLM-extraction quota above. Deliberately a *warning* on an otherwise-ok
+  file, not an error — the records are real; only some addresses are
+  less confidently placed than they'd otherwise be. Note there's no
+  running "X of N Gemini calls used today" counter anywhere in this app —
+  confirmed (2026-07) while adding this: it was never built, despite the
+  "20/day" figure appearing in several comments as *context* for why
+  quota exhaustion happens easily, not as anything actually tracked.
 
   Tier 3's own result is never trusted from cache (`extraction/geocode.py`'s
   `geocode(..., confident=False)`) — confirmed (2026-07) that testing GPE

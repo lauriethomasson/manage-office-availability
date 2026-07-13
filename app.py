@@ -292,6 +292,13 @@ def process():
                 "method": r["method"],
                 "record_count": r["record_count"],
                 "error": r["error"],
+                # Set alongside a normal "ok" status/None error — a file
+                # that extracted fine but hit Gemini's daily quota partway
+                # through its own address-lookup fallback (extraction.
+                # pipeline._geocode_records), not something that failed
+                # the file itself. The frontend's Notes column shows
+                # whichever of error/warning is set.
+                "warning": r.get("warning"),
                 "output_file": r.get("output_file"),
                 "source_file": r.get("source_file"),
             }

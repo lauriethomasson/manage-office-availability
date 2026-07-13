@@ -7,6 +7,7 @@ import json
 import os
 import re
 
+from . import quota
 from .schema import LLM_FIELDS
 
 # Beyond the visible spreadsheet columns in LLM_FIELDS, also ask for a raw
@@ -98,6 +99,20 @@ def extract_with_llm(text, source_hint=""):
         # tells us exactly what to catch instead of us guessing again.
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
         err_text = str(e)
+        if quota.is_quota_exceeded(e):
+            # Distinct from every other failure below: this file's own
+            # extraction didn't go wrong, Gemini's free-tier daily quota
+            # for this model is simply used up for today. Framed
+            # per-file/scoped (never "the app is down") since a
+            # rule-based source (Knotel/MetSpace/GPE/Kitts) never reaches
+            # this code path at all and keeps processing normally in the
+            # same batch.
+            raise LLMExtractionError(
+                quota.reset_message("Gemini's daily AI-extraction limit")
+                + " This file needs the AI fallback because no known-provider parser "
+                "(Knotel, MetSpace, GPE, Kitts) recognized its layout — files that DO "
+                "match one of those aren't affected and will still process normally."
+            )
         is_auth_error = (
             code in (401, "401", 403, "403")
             or "UNAUTHENTICATED" in err_text
