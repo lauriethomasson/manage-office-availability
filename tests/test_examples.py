@@ -864,6 +864,77 @@ def check_llm_prompt_handles_ranges_and_price_tiers(failures):
     failures.extend(local_failures)
 
 
+def check_derived_postcode_always_flagged(failures):
+    """Targeted regression test for a real labeling bug (2026-07, found by
+    directly inspecting a real MetSpace.xlsx): rows with a numbered street
+    address (e.g. "9-10 Market Place") showed a Property Postcode with NO
+    "(Not in source text)" flag at all, even though MetSpace's real
+    source email never states a postcode for ANY building — numbered
+    street address or bare name alike. The bug conflated two different
+    things: geocoding CONFIDENCE (derived_note — a numbered address lets
+    Nominatim match more confidently than a bare name, so Lat/Lng need no
+    flag) and postcode PROVENANCE (postcode_from_geocode — whether the
+    postcode was actually present in the source text at all, independent
+    of how the address itself was matched). The old code only flagged
+    Property Postcode when derived_note was ALSO true (i.e. only for a
+    bare-name match), so a confident numbered-address geocode's
+    Nominatim-derived postcode went completely unflagged.
+
+    Pure function test against extraction.pipeline._geocode_records
+    directly, with geocode replaced by a fake simulating a CONFIDENT
+    numbered-address match (the exact shape that exposed this bug) —
+    covers both a source with no postcode at all (must now be flagged)
+    and, for contrast, a source that already had its own real postcode
+    (must be left untouched, never flagged)."""
+    records = [
+        {"Property Address 1": "9-10 Market Place", "Property Postcode": ""},
+        {"Property Address 1": "43-45 Charlotte Street", "Property Postcode": "W1T 4LU"},
+    ]
+
+    def fake_geocode(query, confident=True):
+        if "9-10 Market Place" in query:
+            return 51.5164430, -0.1402766, "W1W 8AQ", None
+        return 51.5199, -0.1379, "W1T 4LU", None
+
+    def fake_find_address(building, provider_name):
+        raise AssertionError(f"find_address_via_web_search should never be called for a numbered address, got {building!r}")
+
+    original_geocode = pipeline_module.geocode
+    original_find = pipeline_module.find_address_via_web_search
+    pipeline_module.geocode = fake_geocode
+    pipeline_module.find_address_via_web_search = fake_find_address
+    try:
+        future_deadline = time.monotonic() + 100
+        pipeline_module._geocode_records(records, "MetSpace test.eml", "MetSpace", future_deadline)
+    finally:
+        pipeline_module.geocode = original_geocode
+        pipeline_module.find_address_via_web_search = original_find
+
+    local_failures = []
+    no_postcode_record = records[0]
+    if no_postcode_record.get("Lat") != 51.5164430 or no_postcode_record.get("Lng") != -0.1402766:
+        local_failures.append(
+            f"expected a confident numbered-address match to leave Lat/Lng UNflagged (51.516443, -0.1402766), "
+            f"got Lat={no_postcode_record.get('Lat')!r} Lng={no_postcode_record.get('Lng')!r}"
+        )
+    if no_postcode_record.get("Property Postcode") != "W1W 8AQ (Not in source text)":
+        local_failures.append(
+            f"expected a postcode derived from geocoding (source had none) to be flagged "
+            f"'W1W 8AQ (Not in source text)', got {no_postcode_record.get('Property Postcode')!r}"
+        )
+
+    had_postcode_record = records[1]
+    if had_postcode_record.get("Property Postcode") != "W1T 4LU":
+        local_failures.append(
+            f"expected a postcode already present in the source text to be left untouched ('W1T 4LU'), "
+            f"got {had_postcode_record.get('Property Postcode')!r}"
+        )
+
+    if not local_failures:
+        print("OK  derived postcode flagging: a confident numbered-address geocode's postcode is flagged, an already-known one is left alone")
+    failures.extend(local_failures)
+
+
 def check_batch_deadline_stops_remaining_lookups(failures):
     """Targeted regression test for a real Render SIGKILL (2026-07, "UNION
     - Availability - June 26 - City 2.xlsx"): a file with many bare-name/
@@ -1522,6 +1593,7 @@ def main():
     check_source_filename_disambiguation(failures)
     check_html_images_for_llm_fallback(failures)
     check_llm_prompt_handles_ranges_and_price_tiers(failures)
+    check_derived_postcode_always_flagged(failures)
     check_batch_deadline_stops_remaining_lookups(failures)
     check_daily_quota_short_circuits_remaining_bare_name_lookups(failures)
     check_gemini_overload_retry(failures)

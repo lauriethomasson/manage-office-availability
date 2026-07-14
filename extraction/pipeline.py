@@ -515,14 +515,9 @@ def _geocode_records(records, filename, provider_name, deadline):
                 # value was derived (web search or a bare-name geocode),
                 # not read directly from the source document. Flagged in
                 # the spreadsheet itself, not just the console log, so
-                # it's distinguishable at a glance. Property Postcode only
-                # gets the same marker when it came from this same lookup —
-                # a postcode already present in the source text is left
-                # alone, since it isn't in question.
+                # it's distinguishable at a glance.
                 record["Lat"] = f"{lat} (Not in source text)"
                 record["Lng"] = f"{lng} (Not in source text)"
-                if postcode_from_geocode:
-                    record["Property Postcode"] = f"{geo_postcode} (Not in source text)"
                 # Surfaced in the spreadsheet too (spreadsheet.write_xlsx
                 # attaches this as a cell comment on Lat) — so a wrong
                 # answer is traceable to what it was actually based on,
@@ -537,6 +532,25 @@ def _geocode_records(records, filename, provider_name, deadline):
             else:
                 record["Lat"] = lat
                 record["Lng"] = lng
+
+            # Property Postcode's own provenance is a DIFFERENT question
+            # from Lat/Lng's (derived_note above): a numbered street
+            # address can geocode confidently enough that Lat/Lng need no
+            # flag at all, while the POSTCODE specifically still came from
+            # Nominatim's own address breakdown, not the source document,
+            # whenever the source never had one to begin with. Confirmed a
+            # real bug (2026-07, MetSpace): its source email never states
+            # a postcode for ANY building, numbered street address or
+            # not, but this flag previously only applied when derived_note
+            # was ALSO true (i.e. only for a bare-name match) — a
+            # confident numbered-address geocode's postcode went
+            # completely unflagged, indistinguishable from one actually
+            # read out of the source text. Geocoding CONFIDENCE
+            # (derived_note) and postcode PROVENANCE
+            # (postcode_from_geocode) are different questions; flagged
+            # independently here so conflating them can't happen again.
+            if postcode_from_geocode:
+                record["Property Postcode"] = f"{geo_postcode} (Not in source text)"
         else:
             # Required fields — flag directly in the cell, not just the
             # console log, so a genuine geocoding gap is visible to anyone
