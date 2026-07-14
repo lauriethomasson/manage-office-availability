@@ -17,6 +17,7 @@ dedicated rule can achieve once a provider is seen often enough to
 justify writing one.
 """
 import re
+from urllib.parse import urlparse
 
 # Confirmed empirically (2026-07, The Workplace Company — a brand-new
 # provider's marketing email, first one seen through this generic path)
@@ -31,6 +32,21 @@ _IMAGE_EXTENSION_RE = re.compile(r"\.(?:png|jpe?g|gif|webp)(?:[?#]|$)", re.IGNOR
 
 _FLOORPLAN_TEXT_RE = re.compile(r"floor\s*plan", re.IGNORECASE)
 _BROCHURE_TEXT_RE = re.compile(r"brochure|view\s*propert|property\s*details|particulars", re.IGNORECASE)
+
+# Confirmed real (2026-07, The Workplace Company): a source can give
+# multiple link candidates for the same listing under different labels
+# ("Brochure" vs "Website"), and the one literally labeled "Brochure"
+# isn't always the usable one — its own "Brochure" column linked to
+# Canva, a JS-rendered viewer (fetched directly: a real HTTP GET comes
+# back as an HTML viewer page, never actual PDF bytes — the same
+# already-confirmed-unusable category as Box.com and Pitch.com, checked
+# the same way earlier this project), while its separate "Website"
+# column pointed at the company's own domain, a real, working page.
+# Domain-based, not label-based, since a source's own "Brochure"-labeled
+# column/button can point at any of these — this lets a caller PREFER a
+# different candidate link for the same listing when one exists, rather
+# than trusting a label alone.
+_LOW_TRUST_LINK_DOMAIN_RE = re.compile(r"(?:^|\.)canva\.(?:com|link)$|(?:^|\.)pitch\.com$|(?:^|\.)box\.com$", re.IGNORECASE)
 
 # Positions either side of a building-name occurrence to scan for its own
 # images/links when a source has 2+ distinct buildings — same idea and
@@ -62,6 +78,21 @@ def is_floorplan_link(text):
 
 def is_brochure_link(text):
     return bool(_BROCHURE_TEXT_RE.search(text or ""))
+
+
+def is_low_trust_link_domain(url):
+    """True if `url`'s domain is a known JS-rendered viewer/presentation
+    tool (Canva, Pitch.com, Box.com — see _LOW_TRUST_LINK_DOMAIN_RE's own
+    comment) rather than a real, directly-fetchable document. A caller
+    with multiple candidate links for the same listing should prefer any
+    OTHER candidate over one of these, falling back to a low-trust link
+    only when it's genuinely the only one available — still better than
+    nothing."""
+    try:
+        host = urlparse(url or "").netloc.lower()
+    except ValueError:
+        return False
+    return bool(_LOW_TRUST_LINK_DOMAIN_RE.search(host))
 
 
 def enrich_records(records, html_items):

@@ -20,6 +20,7 @@ from extraction import html_images
 from extraction.llm_fallback import _build_prompt
 from extraction import pdf_images
 from extraction import xlsx_links
+from extraction import rule_sanity
 from extraction import naming as naming_module
 from extraction import pipeline as pipeline_module
 import app as app_module
@@ -719,6 +720,16 @@ def check_xlsx_links_for_llm_fallback(failures):
     this row's real link entirely, even though it existed. Row 4 below
     pins that exact real case.
 
+    Also confirmed real (2026-07, The Workplace Company): a source can
+    give TWO separate link candidates per row under different labels —
+    its own "Brochure" column linked to Canva (a JS-rendered viewer,
+    confirmed unusable — fetched directly, it returns an HTML page, not
+    real PDF bytes), while a separate "Website" column linked to the
+    company's own domain, which works. The row order (Brochure column
+    before Website column) previously meant the first-seen, unusable
+    Canva link always won. Row 6 below pins that exact real case —
+    Canva must be skipped in favor of the real domain.
+
     Pure function test against hand-built row_links shaped exactly like
     extraction.file_readers._extract_xlsx_row_links' real output — no
     live LLM/network call needed."""
@@ -731,6 +742,15 @@ def check_xlsx_links_for_llm_fallback(failures):
         {"row_text": "Nexus Place -  25 Farringdon Place | 5th", "links": [("Landlord Brochure", "https://example.com/nexus")]},
         # No hyperlink at all in this row — must be left alone, not error.
         {"row_text": "100 Lower Thames Street | 5th | CAT A | 5178", "links": []},
+        # Real case: Brochure (Canva, low-trust) listed BEFORE Website
+        # (the company's own domain) — must still prefer the website.
+        {
+            "row_text": "1 Valentine Place, London, SE1 8QH | 1,528 - 5,028",
+            "links": [
+                ("Brochure", "https://canva.link/jdox0d7g37f1aob"),
+                ("Website", "https://www.theworkplacecompany.co.uk/offices-to-rent/london/1-valentine-place"),
+            ],
+        },
     ]
     records = [
         {"Building": "107 Cannon Street", "Floor/Unit": "4th", "Floor Plan": "", "Brochure PDF": ""},
@@ -738,6 +758,7 @@ def check_xlsx_links_for_llm_fallback(failures):
         {"Building": "155 Fenchurch Street", "Floor/Unit": "7th", "Floor Plan": "", "Brochure PDF": ""},
         {"Building": "Nexus Place - 25 Farringdon Place", "Floor/Unit": "5th", "Floor Plan": "", "Brochure PDF": ""},
         {"Building": "100 Lower Thames Street", "Floor/Unit": "5th", "Floor Plan": "", "Brochure PDF": ""},
+        {"Building": "1 Valentine Place, London, SE1 8QH", "Floor/Unit": "", "Floor Plan": "", "Brochure PDF": ""},
     ]
     xlsx_links.enrich_records(records, row_links)
 
@@ -748,6 +769,7 @@ def check_xlsx_links_for_llm_fallback(failures):
         ("Floor Plan", "https://example.com/155-plan"),
         ("Brochure PDF", "https://example.com/nexus"),
         (None, None),
+        ("Brochure PDF", "https://www.theworkplacecompany.co.uk/offices-to-rent/london/1-valentine-place"),
     ]
     for record, (field, url) in zip(records, expected):
         if field is None:
@@ -766,7 +788,110 @@ def check_xlsx_links_for_llm_fallback(failures):
             )
 
     if not local_failures:
-        print("OK  xlsx_links: 2 same-building rows each get their OWN link, a floor-plan link classified separately, a real double-space mismatch resolved, a linkless row left blank")
+        print(
+            "OK  xlsx_links: 2 same-building rows each get their OWN link, a floor-plan link classified "
+            "separately, a real double-space mismatch resolved, a linkless row left blank, a Canva "
+            "candidate skipped in favor of the real company domain"
+        )
+    failures.extend(local_failures)
+
+
+def check_low_trust_link_domain(failures):
+    """Targeted regression test for extraction.html_images.
+    is_low_trust_link_domain — the domain classifier behind xlsx_links'
+    Brochure PDF fix above (and reusable anywhere else a caller has
+    multiple candidate links for the same listing). Confirmed real
+    (2026-07): Box.com, Pitch.com, and Canva are each a JS-rendered
+    viewer page when fetched directly (real HTTP response comes back as
+    text/html, never actual PDF bytes) — checked directly against the
+    real UNION, Knotel, and Workplace Company sources respectively."""
+    cases = [
+        ("https://canva.link/jdox0d7g37f1aob", True),
+        ("https://www.canva.com/design/abc123/view", True),
+        ("https://app.pitch.com/app/presentation/abc", True),
+        ("https://pitch.com/v/1-finsbury-brochure-4jnj9d", True),
+        ("https://app.box.com/s/5ln9uri46xhq586qdoskbc37rhrrftr7", True),
+        ("https://www.theworkplacecompany.co.uk/offices-to-rent/london/abc", False),
+        ("https://knotel.com/offices/london/1-finsbury-market", False),
+        ("", False),
+    ]
+    local_failures = []
+    for url, expected in cases:
+        result = html_images.is_low_trust_link_domain(url)
+        if result != expected:
+            local_failures.append(f"is_low_trust_link_domain({url!r}) expected {expected!r}, got {result!r}")
+    if not local_failures:
+        print(f"OK  low-trust link domain: {len(cases)} cases (Canva/Pitch/Box vs 2 real company domains) spot-checked")
+    failures.extend(local_failures)
+
+
+def check_rule_sanity_check_fallback(failures):
+    """Targeted regression test for extraction.rule_sanity — the general
+    safety net added on request after a real incident (2026-07): MetSpace
+    sent a second, structurally different email template ("Office Of The
+    Week", a single-listing spotlight, real fixture below) that
+    extraction.rules.metspace was never built for. detect() correctly
+    recognized the sender, but parse()'s own area-header anchor logic
+    found no area line to trim the buffered text on, so the ENTIRE email
+    signature/header/legal-disclaimer text ahead of the one real
+    "Sqft:" line ended up verbatim in Building — thousands of characters
+    of boilerplate in a field meant to hold a building name, silently
+    accepted because parse() ran without raising.
+
+    Covers both layers: (1) extraction.rule_sanity.records_look_plausible
+    directly, pure function, against a hand-built oversized/boilerplate
+    record and a genuinely normal one (must NOT false-positive on real
+    data); (2) extraction.rules.try_rules against the REAL "Office Of
+    The Week" fixture end to end — confirms the whole rule (not just
+    parse(), which still "succeeds") is now correctly rejected,
+    returning (None, None) so process_files falls back to the LLM
+    instead of accepting the garbage, the same way an entirely
+    unrecognized new provider already does. The normal-file
+    non-false-positive counterpart to this (MetSpace's OWN usual
+    template still matching and returning real records) is already
+    covered by main()'s own EXPECTATIONS loop, run every time this
+    suite does — not duplicated here."""
+    local_failures = []
+
+    plausible_cases = [
+        ([{"Building": "9-10 Market Place", "Area": "West End", "Floor/Unit": "3rd"}], True),
+        (
+            [{"Building": "X" * 500, "Area": "West End", "Floor/Unit": "3rd"}],
+            False,
+        ),
+        (
+            [{"Building": "IMPORTANT: This e-mail is intended for the named recipient only.", "Area": "", "Floor/Unit": ""}],
+            False,
+        ),
+        (
+            [{"Building": "44 Pentonville Road", "Contacts": "Sent: 14 July 2026 11:24 To: someone@example.com"}],
+            False,
+        ),
+    ]
+    for records, expected in plausible_cases:
+        result = rule_sanity.records_look_plausible(records)
+        if result != expected:
+            local_failures.append(f"records_look_plausible({records!r}) expected {expected!r}, got {result!r}")
+
+    filename = "Fw_ MetSpace - Office Of The Week!.eml"
+    path = ROOT / filename
+    if not path.exists():
+        local_failures.append(f"{filename}: example file not found (expected at {path})")
+    else:
+        content = read_file(path)
+        rule_name, records = try_rules(content)
+        if rule_name is not None or records is not None:
+            local_failures.append(
+                f"{filename}: expected try_rules to reject this (rule_name=None, records=None) since MetSpace's "
+                f"own rule's output for it is implausible, got rule_name={rule_name!r} with "
+                f"{len(records) if records else 0} record(s)"
+            )
+
+    if not local_failures:
+        print(
+            "OK  rule sanity check: 4 plausibility cases (1 normal, 3 implausible) spot-checked, real "
+            "'Office Of The Week' fixture correctly rejected by try_rules (falls back to the LLM)"
+        )
     failures.extend(local_failures)
 
 
@@ -1748,6 +1873,8 @@ def main():
     check_area_disambiguated_output_names(failures)
     check_html_images_for_llm_fallback(failures)
     check_xlsx_links_for_llm_fallback(failures)
+    check_low_trust_link_domain(failures)
+    check_rule_sanity_check_fallback(failures)
     check_llm_prompt_handles_ranges_and_price_tiers(failures)
     check_derived_postcode_always_flagged(failures)
     check_batch_deadline_stops_remaining_lookups(failures)

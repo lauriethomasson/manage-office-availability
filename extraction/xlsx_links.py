@@ -15,7 +15,7 @@ every row despite real links existing in the source.
 """
 import re
 
-from .html_images import is_floorplan_link
+from .html_images import is_floorplan_link, is_low_trust_link_domain
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -52,11 +52,19 @@ def enrich_records(records, row_links):
     the link text to actually mention "brochure"/"particulars"/etc —
     appropriate for scanning a whole free-text email body full of
     unrelated links), any non-floorplan link found in a source row here
-    defaults to Brochure PDF regardless of its own display text ("CLICK
-    HERE" says nothing on its own) — a per-row hyperlink in a
+    is a Brochure PDF candidate regardless of its own display text
+    ("CLICK HERE" says nothing on its own) — a per-row hyperlink in a
     spreadsheet's own dedicated link column is reliably one or the
     other; there's no "unrelated link" noise here to filter the way a
-    marketing email body has."""
+    marketing email body has. When a row has more than one such
+    candidate (confirmed real, 2026-07 — The Workplace Company gives a
+    separate "Brochure" AND "Website" column per listing), the first
+    one whose domain ISN'T a known JS-viewer/presentation tool
+    (is_low_trust_link_domain) wins, rather than just taking whichever
+    column happens to come first — a link literally labeled "Brochure"
+    pointed at Canva there, while "Website" pointed at the company's own
+    domain and actually works. Only falls back to a low-trust candidate
+    when every candidate in the row is one — still better than nothing."""
     if not records or not row_links:
         return
 
@@ -75,15 +83,28 @@ def enrich_records(records, row_links):
         row = available.pop(match_idx)
 
         floorplan_url = None
-        brochure_url = None
+        brochure_candidates = []
         for display_text, url in row["links"]:
             if is_floorplan_link(display_text):
                 if floorplan_url is None:
                     floorplan_url = url
-            elif brochure_url is None:
-                brochure_url = url
+            else:
+                brochure_candidates.append(url)
+        brochure_url = _best_brochure_candidate(brochure_candidates)
 
         if floorplan_url and not record.get("Floor Plan"):
             record["Floor Plan"] = floorplan_url
         if brochure_url and not record.get("Brochure PDF"):
             record["Brochure PDF"] = brochure_url
+
+
+def _best_brochure_candidate(urls):
+    """The first URL that ISN'T a known low-trust JS-viewer domain, or
+    the first URL at all if every candidate is one — see enrich_records'
+    own docstring for why domain, not column order, decides this."""
+    if not urls:
+        return None
+    for url in urls:
+        if not is_low_trust_link_domain(url):
+            return url
+    return urls[0]
