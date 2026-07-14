@@ -497,8 +497,9 @@ def check_knotel_records(failures):
 def check_street_address_only(failures):
     """Targeted regression test for extraction.schema.street_address_only —
     pins real Building values pulled directly from every example source
-    (not hand-invented strings) against the exact expected "just street
-    name and number" result, plus the illustrative Crown Estate-style
+    (not hand-invented strings) against the exact expected "Building
+    Name, Street Number Street Name" result (name kept when one genuinely
+    exists, postcode never kept), plus the illustrative Crown Estate-style
     "Princes House, 38 Jermyn Street, SW1Y" case from extraction.pipeline's
     own docstring. Deliberately a pure function-level check (no file I/O
     needed for most cases) since street_address_only never touches
@@ -507,31 +508,48 @@ def check_street_address_only(failures):
     run, not from schema.normalize_record."""
     cases = [
         # Knotel — the "Name, Street, London POSTCODE" shape (both name
-        # and street real, no overlap between them).
-        ("Gilray House, 146-150 City Rd, London EC1V 2RL", "146-150 City Rd"),
-        ("The Hallmark Building, 106 Fenchurch St, London EC3M 5JE", "106 Fenchurch St"),
-        ("Rufus House, 2-4 Rufus St, London N1 6PE", "2-4 Rufus St"),
-        # Knotel — "Street, POSTCODE" shape (no separate name at all).
+        # and street real, no overlap between them) — name is kept.
+        ("Gilray House, 146-150 City Rd, London EC1V 2RL", "Gilray House, 146-150 City Rd"),
+        ("The Hallmark Building, 106 Fenchurch St, London EC3M 5JE", "The Hallmark Building, 106 Fenchurch St"),
+        ("Rufus House, 2-4 Rufus St, London N1 6PE", "Rufus House, 2-4 Rufus St"),
+        # Knotel — "Street, POSTCODE" shape (no separate name at all) —
+        # nothing to combine, just the street.
         ("2 Leonard Circus, EC2A 4LW", "2 Leonard Circus"),
         # Knotel — 3-comma-segment shape where the last segment (the real
         # street) has no digit of its own ("Old St") but an earlier one
-        # does ("174-180 Martha's Buildings") — must prefer the digit.
-        ("Classic House, 174-180 Martha's Buildings, Old St, London EC1V 9BP", "174-180 Martha's Buildings"),
+        # does ("174-180 Martha's Buildings") — the digit-bearing segment
+        # is kept, "Old St" is dropped, and the name before it ("Classic
+        # House") IS kept since it precedes the digit-bearing segment.
+        (
+            "Classic House, 174-180 Martha's Buildings, Old St, London EC1V 9BP",
+            "Classic House, 174-180 Martha's Buildings",
+        ),
         # Knotel — no comma at all before "London POSTCODE".
-        ("23 Great Titchfield Street, 23 Great Titchfield St London W1W 7JA", "23 Great Titchfield St"),
+        (
+            "23 Great Titchfield Street, 23 Great Titchfield St London W1W 7JA",
+            "23 Great Titchfield Street, 23 Great Titchfield St",
+        ),
         # Knotel — the real regression case that motivated the digit-
         # preference rule in the first place: the marketing name ("6
-        # Maiden Lane") IS the real street+number, while the address
-        # line itself only ever gives a neighbourhood name with no
-        # number ("Covent Garden") — must not end up with "Covent
-        # Garden" (a neighbourhood, not a street) as the answer.
+        # Maiden Lane") IS the real street+number, while the address line
+        # itself only ever gives a neighbourhood name with no number
+        # ("Covent Garden") — the digit-bearing segment IS the first one
+        # here, so there's nothing before it to keep as a separate name;
+        # must not end up with "Covent Garden" (a neighbourhood, not a
+        # street) attached at all.
         ("6 Maiden Lane, Covent Garden, WC2E 7ND", "6 Maiden Lane"),
         # Knotel — a neighbourhood name combined with only a PARTIAL
         # (outward-only) postcode in the very same segment, no comma
-        # between them at all ("Covent Garden WC2").
-        ("Market Exchange, 8 Macklin Street, Covent Garden WC2", "8 Macklin Street"),
+        # between them at all ("Covent Garden WC2") — name kept, the
+        # neighbourhood+partial-postcode segment dropped entirely.
+        ("Market Exchange, 8 Macklin Street, Covent Garden WC2", "Market Exchange, 8 Macklin Street"),
         # Breezblok — same "Name, Street, London POSTCODE" shape as Knotel.
-        ("John Stow House, 18 Bevis Marks, London EC3A 7JB", "18 Bevis Marks"),
+        ("John Stow House, 18 Bevis Marks, London EC3A 7JB", "John Stow House, 18 Bevis Marks"),
+        # Knotel — the digit-bearing segment is the FIRST one (a
+        # marketing name that's itself a real street+number), with a
+        # later non-numbered alternate name ("Chadwick Court") that's
+        # correctly dropped rather than force-combined.
+        ("15 Hatfields, Chadwick Court, London SE1 8DJ", "15 Hatfields"),
         # GPE/MetSpace/BC — Building is already just a street name/number
         # with no postcode or separate marketing name at all (nothing to
         # strip) — must pass through completely unchanged.
@@ -544,12 +562,12 @@ def check_street_address_only(failures):
         # blanked out, just passed through as the best available text.
         ("Elsley", "Elsley"),
         ("Porters Place", "Porters Place"),
-        # Kitt's — "Name, Street" shape with no postcode at all.
-        ("The Hide, 3 Kingly Court", "3 Kingly Court"),
-        ("Bridge House, 22 Newman Street", "22 Newman Street"),
+        # Kitt's — "Name, Street" shape with no postcode at all — name kept.
+        ("The Hide, 3 Kingly Court", "The Hide, 3 Kingly Court"),
+        ("Bridge House, 22 Newman Street", "Bridge House, 22 Newman Street"),
         # Illustrative Crown Estate/LLM-fallback-style example from
         # extraction.pipeline's own module docstring.
-        ("Princes House, 38 Jermyn Street, SW1Y", "38 Jermyn Street"),
+        ("Princes House, 38 Jermyn Street, SW1Y", "Princes House, 38 Jermyn Street"),
     ]
     local_failures = [
         f"street_address_only({building!r}) expected {expected!r}, got {street_address_only(building)!r}"
@@ -787,9 +805,13 @@ def check_breezblok_records(failures):
     # normalize_record (see street_address_only's own docstring for why
     # that's deliberately deferred to extraction.pipeline.process_files,
     # after geocoding) — check the derivation function directly instead.
+    # Keeps the building name ("John Stow House") alongside the street,
+    # not just the street alone — Building itself is untouched either way.
     derived_street = street_address_only(norm["Building"])
-    if derived_street != "18 Bevis Marks":
-        local_failures.append(f"{filename}: street_address_only(Building) expected '18 Bevis Marks', got {derived_street!r}")
+    if derived_street != "John Stow House, 18 Bevis Marks":
+        local_failures.append(
+            f"{filename}: street_address_only(Building) expected 'John Stow House, 18 Bevis Marks', got {derived_street!r}"
+        )
 
     if not local_failures:
         print(f"OK  {filename}: Breezblok record spot-checked against known-correct source values")

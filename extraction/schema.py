@@ -201,26 +201,34 @@ def _clean_trailing_segment(segment):
 
 
 def street_address_only(building):
-    """Best-effort "just the street name and number" derived from a
-    Building string that may combine a marketing/building name with the
-    real street and a trailing city/postcode — e.g. "Gilray House,
-    146-150 City Rd, London EC1V 2RL" -> "146-150 City Rd"; "2 Leonard
-    Circus, EC2A 4LW" -> "2 Leonard Circus"; "6 Maiden Lane, Covent
-    Garden, WC2E 7ND" -> "6 Maiden Lane"; "Princes House, 38 Jermyn
-    Street, SW1Y" -> "38 Jermyn Street".
+    """"Building Name, Street Number Street Name" derived from a Building
+    string that may combine a marketing/building name with the real
+    street and a trailing city/postcode — keeping the building name
+    (when one genuinely exists) but never the postcode, e.g. "Gilray
+    House, 146-150 City Rd, London EC1V 2RL" -> "Gilray House, 146-150
+    City Rd"; "Market Exchange, 8 Macklin Street, Covent Garden WC2" ->
+    "Market Exchange, 8 Macklin Street"; "John Stow House, 18 Bevis
+    Marks, London EC3A 7JB" -> "John Stow House, 18 Bevis Marks". When
+    there's no separate name at all, just the street remains: "2 Leonard
+    Circus, EC2A 4LW" -> "2 Leonard Circus".
 
     Splits on commas, strips a trailing postcode/city suffix off the
     last segment (repeating if stripping it away entirely reveals
-    another one behind it, e.g. a separate "London" segment), then
-    prefers whichever remaining segment has a house number: the LAST one
-    if it has a digit (the common "Name, Street" shape), else the FIRST
-    one that does (the less common case where the real number sits in an
-    earlier segment than a trailing non-numbered qualifier — e.g.
-    Classic House's "174-180 Martha's Buildings, Old St", or 6 Maiden
-    Lane's own "Covent Garden" neighbourhood mention with no number of
-    its own). Falls back to the fullest available text, never blank, if
-    no segment has a digit at all — safer than guessing which single
-    word is "the" street name when there's no way to confidently tell.
+    another one behind it, e.g. a separate "London" segment), then finds
+    whichever remaining segment has a house number: the LAST one if it
+    has a digit (the common "Name, Street" shape — everything before it
+    is the name, kept), else the FIRST one that does (the less common
+    case where the real number sits in an earlier segment than a
+    trailing non-numbered qualifier — e.g. Classic House's "174-180
+    Martha's Buildings, Old St", where "Old St" is dropped but "Classic
+    House" is kept since it precedes the digit-bearing segment; or 6
+    Maiden Lane's own "Covent Garden" neighbourhood mention with no
+    number of its own, where the digit-bearing segment IS the first one,
+    so there's nothing before it to keep as a separate name — "6 Maiden
+    Lane" alone, "Covent Garden" dropped). Falls back to the fullest
+    available text, never blank, if no segment has a digit at all —
+    safer than guessing which single word is "the" street name when
+    there's no way to confidently tell.
 
     Deliberately never called from normalize_record itself — Property
     Address 1 there is still set to the unmodified Building, since
@@ -249,12 +257,20 @@ def street_address_only(building):
 
     if not segments:
         return ""
+    if len(segments) == 1:
+        return segments[0]
+
     if any(ch.isdigit() for ch in segments[-1]):
-        return segments[-1]
-    for seg in segments:
-        if any(ch.isdigit() for ch in seg):
-            return seg
-    return ", ".join(segments)
+        street_idx = len(segments) - 1
+    else:
+        street_idx = next((i for i, seg in enumerate(segments) if any(ch.isdigit() for ch in seg)), None)
+
+    if street_idx is None:
+        return ", ".join(segments)
+
+    name_segments = segments[:street_idx]
+    street = segments[street_idx]
+    return f"{', '.join(name_segments)}, {street}" if name_segments else street
 
 
 _NO_VALUE_TOKENS = {"", "n/a", "na", "-", "none", "tbc", "0"}
