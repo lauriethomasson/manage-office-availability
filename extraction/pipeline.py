@@ -16,7 +16,7 @@ from .geocode import geocode
 from .llm_fallback import LLMExtractionError, extract_with_llm
 from .naming import extract_date, resolve_provider_name, resolve_source_date
 from .rules import try_rules
-from .schema import normalize_record
+from .schema import normalize_record, street_address_only
 
 # A trailing postal district/area code with no inward part (e.g. "W1",
 # "SW1Y", "EC2V") — short enough to be a district code, not a full street
@@ -204,6 +204,20 @@ def process_files(paths):
         # (e.g. "Elsley GPE Fully Managed" instead of just "Elsley").
         provider_name = resolve_provider_name(rule_name, filename, llm_source_name)
         quota_exhausted = _geocode_records(normalized, filename, provider_name)
+
+        # Deliberately AFTER geocoding, not before: _geocode_records (and
+        # everything it calls — _geocode_query, _address_retry_candidates,
+        # the is_bare_name web-search branch) reads Property Address 1 as
+        # the full "Name, Street, City Postcode" text straight from
+        # Building, exactly as it always has — that's what its own retry
+        # logic was built around (a combined name+address string can
+        # confuse Nominatim; see this module's docstring). Only now, once
+        # nothing further needs that fuller text, is Property Address 1
+        # overwritten with a clean street-only value for the actual
+        # spreadsheet output — Building itself is never touched.
+        for record in normalized:
+            record["Property Address 1"] = street_address_only(record.get("Building"))
+
         if quota_exhausted:
             # Scoped to this file's own note, not a batch-wide error — the
             # file's records extracted fine; this only affects rows whose

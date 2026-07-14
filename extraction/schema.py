@@ -3,6 +3,8 @@
 Derived from the example output (Kitt's Availability PDF): columns, ordering,
 and the PCM/PSF relationship used across all three example sources.
 """
+import re
+
 from .address import extract_postcode
 
 # Fields a rule parser or the LLM fallback actually extracts from a source
@@ -103,8 +105,22 @@ def normalize_record(record):
     # processing date are known, not derivable per-record here.
     out["External Ref"] = ""
     # Required field — a source with no contact/agent info at all (no
-    # Contacts value to mirror) would otherwise leave this blank.
-    out["Assigned Agents"] = out["Contacts"] or "Unknown"
+    # Contacts value to mirror) would otherwise leave this blank. Distinct
+    # from Contacts itself (name + email + phone, e.g. Knotel's "Knotel
+    # Brokers, londonbrokers@knotel.com, 0204 571 4271") — this is a
+    # name-only subset of that same information (see names_only), never a
+    # duplicate of the fuller field.
+    out["Assigned Agents"] = names_only(out["Contacts"]) or "Unknown"
+    # Property Address 1 is deliberately left as Building here, unchanged
+    # from how this has always worked — extraction.pipeline reads THIS
+    # value (not a cleaned-up one) for its own geocoding, exactly as
+    # before, so that logic (including the retry fallbacks built
+    # specifically to handle a combined "Name, Address" string confusing
+    # Nominatim) is untouched and stays exactly as reliable as it already
+    # is. A separate, later pipeline step (extraction.pipeline.
+    # process_files, after geocoding has already run) overwrites this
+    # with a clean street-only value via street_address_only, once
+    # nothing further needs the fuller text.
     out["Property Address 1"] = out["Building"]
     out["Property Postcode"] = extract_postcode(out["Building"])
     out["Lat"] = ""
@@ -120,6 +136,108 @@ def normalize_record(record):
     out["To Let"] = "Yes"
 
     return out
+
+
+_EMAIL_RE = re.compile(r"^[\w.+-]+@[\w.-]+\.\w+$")
+_PHONE_RE = re.compile(r"^0\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,4}$")
+
+
+def names_only(contacts):
+    """Strips any email address or phone number out of a comma-separated
+    Contacts value, leaving just the name(s)/company — e.g. Knotel's
+    "Knotel Brokers, londonbrokers@knotel.com, 0204 571 4271" becomes
+    "Knotel Brokers". A source whose Contacts is already just names
+    (Kitt's "Leah Noray, Ben Danaher", GPE/MetSpace's own contact
+    blocks, Breezblok's "Sales") passes through unchanged — those rules
+    never put an email/phone into Contacts in the first place, so there's
+    nothing here to strip. General-purpose (not tied to any one rule) so
+    it applies the same way regardless of which source produced Contacts,
+    current or future."""
+    if not contacts:
+        return ""
+    parts = [p.strip() for p in contacts.split(",")]
+    names = [p for p in parts if p and not _EMAIL_RE.match(p) and not _PHONE_RE.match(p)]
+    return ", ".join(names)
+
+
+_TRAILING_POSTCODE_RE = re.compile(
+    r"(?:\bLondon\s+)?[A-Za-z]{1,2}\d[A-Za-z\d]?(?:\s*\d[A-Za-z]{2})?\s*$",
+    re.IGNORECASE,
+)
+_BARE_LONDON_RE = re.compile(r"^london$", re.IGNORECASE)
+
+
+def _clean_trailing_segment(segment):
+    """Strips a trailing UK postcode (full or partial), optionally
+    preceded by the literal word "London", from the END of a single
+    comma-separated address segment — e.g. "Covent Garden WC2" ->
+    "Covent Garden" (a neighbourhood name, not a street, so it still
+    isn't the answer on its own — see street_address_only), "London
+    EC3M 5JE" -> "" (the whole segment was just city+postcode, nothing
+    else). Never touches anything before that trailing postcode-shaped
+    text, so a real street name — which doesn't itself end in a bare
+    postcode pattern — passes through unchanged."""
+    stripped = _TRAILING_POSTCODE_RE.sub("", segment).strip()
+    if _BARE_LONDON_RE.match(stripped):
+        return ""
+    return stripped
+
+
+def street_address_only(building):
+    """Best-effort "just the street name and number" derived from a
+    Building string that may combine a marketing/building name with the
+    real street and a trailing city/postcode — e.g. "Gilray House,
+    146-150 City Rd, London EC1V 2RL" -> "146-150 City Rd"; "2 Leonard
+    Circus, EC2A 4LW" -> "2 Leonard Circus"; "6 Maiden Lane, Covent
+    Garden, WC2E 7ND" -> "6 Maiden Lane"; "Princes House, 38 Jermyn
+    Street, SW1Y" -> "38 Jermyn Street".
+
+    Splits on commas, strips a trailing postcode/city suffix off the
+    last segment (repeating if stripping it away entirely reveals
+    another one behind it, e.g. a separate "London" segment), then
+    prefers whichever remaining segment has a house number: the LAST one
+    if it has a digit (the common "Name, Street" shape), else the FIRST
+    one that does (the less common case where the real number sits in an
+    earlier segment than a trailing non-numbered qualifier — e.g.
+    Classic House's "174-180 Martha's Buildings, Old St", or 6 Maiden
+    Lane's own "Covent Garden" neighbourhood mention with no number of
+    its own). Falls back to the fullest available text, never blank, if
+    no segment has a digit at all — safer than guessing which single
+    word is "the" street name when there's no way to confidently tell.
+
+    Deliberately never called from normalize_record itself — Property
+    Address 1 there is still set to the unmodified Building, since
+    extraction.pipeline's geocoding is keyed off that full text (see its
+    own module docstring for why: a combined "Name, Address" string
+    confuses Nominatim, which is exactly what its retry-candidate
+    fallbacks exist to work around). This is called once, separately,
+    after that geocoding has already run — geocoding accuracy is
+    completely unaffected by this function existing at all."""
+    text = (building or "").strip()
+    if not text:
+        return ""
+
+    segments = [s.strip() for s in text.split(",") if s.strip()]
+    if not segments:
+        return ""
+
+    while segments:
+        cleaned_last = _clean_trailing_segment(segments[-1])
+        if cleaned_last == segments[-1]:
+            break  # nothing postcode/city-shaped left to strip here — stop
+        if cleaned_last:
+            segments[-1] = cleaned_last
+            break
+        segments.pop()  # that segment was purely city/postcode — drop it, check what's now last
+
+    if not segments:
+        return ""
+    if any(ch.isdigit() for ch in segments[-1]):
+        return segments[-1]
+    for seg in segments:
+        if any(ch.isdigit() for ch in seg):
+            return seg
+    return ", ".join(segments)
 
 
 _NO_VALUE_TOKENS = {"", "n/a", "na", "-", "none", "tbc", "0"}

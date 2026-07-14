@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from extraction.file_readers import read_file
 from extraction.rules import try_rules
-from extraction.schema import normalize_record
+from extraction.schema import normalize_record, street_address_only, names_only
 from extraction import pdf_images
 import app as app_module
 
@@ -447,6 +447,16 @@ def check_knotel_records(failures):
         if contacts_values != {KNOTEL_CONTACTS}:
             local_failures.append(f"{filename}: expected Contacts == {KNOTEL_CONTACTS!r} for every row, got {contacts_values}")
 
+        # Assigned Agents is a NAME-ONLY subset of Contacts, not a
+        # duplicate of it — must drop the email/phone that Contacts
+        # itself correctly keeps.
+        assigned_agents_values = {r["Assigned Agents"] for r in normalized}
+        if assigned_agents_values != {"Knotel Brokers"}:
+            local_failures.append(
+                f"{filename}: expected Assigned Agents == 'Knotel Brokers' (name only, no email/phone) for every row, "
+                f"got {assigned_agents_values}"
+            )
+
         # Every OTHER row (not one of the two 15 Hatfields price-drop rows
         # above) must have blank Special Features — guards against the
         # promo note leaking onto an unrelated building/floor.
@@ -473,6 +483,98 @@ def check_knotel_records(failures):
         if not local_failures:
             print(f"OK  {filename}: {len(records)} Knotel records spot-checked against known-correct source values")
         failures.extend(local_failures)
+
+
+def check_street_address_only(failures):
+    """Targeted regression test for extraction.schema.street_address_only —
+    pins real Building values pulled directly from every example source
+    (not hand-invented strings) against the exact expected "just street
+    name and number" result, plus the illustrative Crown Estate-style
+    "Princes House, 38 Jermyn Street, SW1Y" case from extraction.pipeline's
+    own docstring. Deliberately a pure function-level check (no file I/O
+    needed for most cases) since street_address_only never touches
+    geocoding — see its own docstring for why it's called from
+    extraction.pipeline.process_files only AFTER geocoding has already
+    run, not from schema.normalize_record."""
+    cases = [
+        # Knotel — the "Name, Street, London POSTCODE" shape (both name
+        # and street real, no overlap between them).
+        ("Gilray House, 146-150 City Rd, London EC1V 2RL", "146-150 City Rd"),
+        ("The Hallmark Building, 106 Fenchurch St, London EC3M 5JE", "106 Fenchurch St"),
+        ("Rufus House, 2-4 Rufus St, London N1 6PE", "2-4 Rufus St"),
+        # Knotel — "Street, POSTCODE" shape (no separate name at all).
+        ("2 Leonard Circus, EC2A 4LW", "2 Leonard Circus"),
+        # Knotel — 3-comma-segment shape where the last segment (the real
+        # street) has no digit of its own ("Old St") but an earlier one
+        # does ("174-180 Martha's Buildings") — must prefer the digit.
+        ("Classic House, 174-180 Martha's Buildings, Old St, London EC1V 9BP", "174-180 Martha's Buildings"),
+        # Knotel — no comma at all before "London POSTCODE".
+        ("23 Great Titchfield Street, 23 Great Titchfield St London W1W 7JA", "23 Great Titchfield St"),
+        # Knotel — the real regression case that motivated the digit-
+        # preference rule in the first place: the marketing name ("6
+        # Maiden Lane") IS the real street+number, while the address
+        # line itself only ever gives a neighbourhood name with no
+        # number ("Covent Garden") — must not end up with "Covent
+        # Garden" (a neighbourhood, not a street) as the answer.
+        ("6 Maiden Lane, Covent Garden, WC2E 7ND", "6 Maiden Lane"),
+        # Knotel — a neighbourhood name combined with only a PARTIAL
+        # (outward-only) postcode in the very same segment, no comma
+        # between them at all ("Covent Garden WC2").
+        ("Market Exchange, 8 Macklin Street, Covent Garden WC2", "8 Macklin Street"),
+        # Breezblok — same "Name, Street, London POSTCODE" shape as Knotel.
+        ("John Stow House, 18 Bevis Marks, London EC3A 7JB", "18 Bevis Marks"),
+        # GPE/MetSpace/BC — Building is already just a street name/number
+        # with no postcode or separate marketing name at all (nothing to
+        # strip) — must pass through completely unchanged.
+        ("9-10 Market Place", "9-10 Market Place"),
+        ("170 Piccadilly", "170 Piccadilly"),
+        ("10-12 Alie Street", "10-12 Alie Street"),
+        # GPE/BC — a bare marketing name with no separate address info in
+        # the source at all (no digit, no postcode) — the "should be
+        # rare" case where nothing better is available; must not be
+        # blanked out, just passed through as the best available text.
+        ("Elsley", "Elsley"),
+        ("Porters Place", "Porters Place"),
+        # Kitt's — "Name, Street" shape with no postcode at all.
+        ("The Hide, 3 Kingly Court", "3 Kingly Court"),
+        ("Bridge House, 22 Newman Street", "22 Newman Street"),
+        # Illustrative Crown Estate/LLM-fallback-style example from
+        # extraction.pipeline's own module docstring.
+        ("Princes House, 38 Jermyn Street, SW1Y", "38 Jermyn Street"),
+    ]
+    local_failures = [
+        f"street_address_only({building!r}) expected {expected!r}, got {street_address_only(building)!r}"
+        for building, expected in cases
+        if street_address_only(building) != expected
+    ]
+    if not local_failures:
+        print(f"OK  street_address_only: {len(cases)} real Building values spot-checked against known-correct results")
+    failures.extend(local_failures)
+
+
+def check_names_only(failures):
+    """Targeted regression test for extraction.schema.names_only, which
+    extraction.schema.normalize_record uses to derive Assigned Agents
+    from Contacts — must strip an email/phone number out of a combined
+    contact string (Knotel's real "Knotel Brokers, londonbrokers@
+    knotel.com, 0204 571 4271" -> "Knotel Brokers") while leaving a
+    Contacts value that's already just name(s) completely unchanged
+    (Kitt's real "Leah Noray, Ben Danaher", Breezblok's real "Sales")."""
+    cases = [
+        ("Knotel Brokers, londonbrokers@knotel.com, 0204 571 4271", "Knotel Brokers"),
+        ("Leah Noray, Ben Danaher", "Leah Noray, Ben Danaher"),
+        ("Kieran Christie, Sophie Haugh, Nicki Mayle", "Kieran Christie, Sophie Haugh, Nicki Mayle"),
+        ("Sales", "Sales"),
+        ("", ""),
+    ]
+    local_failures = [
+        f"names_only({contacts!r}) expected {expected!r}, got {names_only(contacts)!r}"
+        for contacts, expected in cases
+        if names_only(contacts) != expected
+    ]
+    if not local_failures:
+        print(f"OK  names_only: {len(cases)} real Contacts values spot-checked against known-correct results")
+    failures.extend(local_failures)
 
 
 def check_bc_records(failures):
@@ -520,6 +622,10 @@ def check_bc_records(failures):
                 "Marketing Price (Based on Min Term) PSF": 120.0,
                 "Special Features": "Communal Lounge, Break-out & Terrace",
                 "For Sale": "Yes",
+                # BC's own table has no contact/agent column at all (see
+                # this module's docstring) — Assigned Agents must fall
+                # back to "Unknown", not be left blank or invent one.
+                "Assigned Agents": "Unknown",
             },
         ),
         (
@@ -529,6 +635,7 @@ def check_bc_records(failures):
                 "Desks (max)": 50,
                 "Marketing Price (Based on Min Term) PCM": 35000,
                 "For Sale": "No",
+                "Assigned Agents": "Unknown",
             },
         ),
         (
@@ -539,6 +646,7 @@ def check_bc_records(failures):
                 "Marketing Price (Based on Min Term) PCM": 55036,
                 "State of Space": "Immediate",
                 "For Sale": "No",
+                "Assigned Agents": "Unknown",
             },
         ),
     ]
@@ -591,6 +699,12 @@ def check_breezblok_records(failures):
         "Desks (max)": 32,
         "Marketing Price (Based on Min Term) PCM": 18000,
         "Contacts": "Sales",
+        # Not an individual's name, but Breezblok's own source names no
+        # one else either — see extraction.rules.breezblok._contact's own
+        # docstring for why this is the correct, non-blank value, same as
+        # Contacts. names_only() must leave it unchanged (it isn't an
+        # email/phone number to strip).
+        "Assigned Agents": "Sales",
         "Property Postcode": "EC3A 7JB",
     }
     local_failures = [
@@ -598,6 +712,15 @@ def check_breezblok_records(failures):
         for field, expected_value in expected.items()
         if norm.get(field) != expected_value
     ]
+
+    # Property Address 1 itself isn't set to the clean value by
+    # normalize_record (see street_address_only's own docstring for why
+    # that's deliberately deferred to extraction.pipeline.process_files,
+    # after geocoding) — check the derivation function directly instead.
+    derived_street = street_address_only(norm["Building"])
+    if derived_street != "18 Bevis Marks":
+        local_failures.append(f"{filename}: street_address_only(Building) expected '18 Bevis Marks', got {derived_street!r}")
+
     if not local_failures:
         print(f"OK  {filename}: Breezblok record spot-checked against known-correct source values")
     failures.extend(local_failures)
@@ -768,6 +891,8 @@ def main():
     check_metspace_floor_plans(failures)
     check_gpe_high_res_images(failures)
     check_knotel_records(failures)
+    check_street_address_only(failures)
+    check_names_only(failures)
     check_bc_records(failures)
     check_breezblok_records(failures)
     check_pdf_floorplan_vs_photos(
