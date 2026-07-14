@@ -334,7 +334,14 @@ def _search(building_name, provider_name, context_hint):
             # gunicorn's own signal-based timeout, so an unbounded hang
             # here would eventually SIGKILL the whole worker, logged as
             # "Perhaps out of memory?" regardless of the real cause.
-            response = call_with_timeout(_call, CALL_TIMEOUT_SECONDS)
+            # Wrapped in call_with_overload_retry so a transient 503 "high
+            # demand" error gets a couple of automatic short-wait retries
+            # before counting as a real failure for this building — see
+            # that function's own docstring for why this is deliberately
+            # NOT the same handling as a 429 quota error below.
+            response = quota.call_with_overload_retry(
+                lambda: call_with_timeout(_call, CALL_TIMEOUT_SECONDS), label=building_name
+            )
         except Exception as e:
             # A quota error (429), a network failure, etc. — not a real
             # answer, so not cacheable; the caller should be free to retry

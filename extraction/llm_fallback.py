@@ -132,7 +132,14 @@ def extract_with_llm(text, source_hint=""):
         # escalate to a raw SIGKILL — logged as "Perhaps out of memory?"
         # regardless of the real cause. call_with_timeout enforces a true,
         # independent wall-clock deadline on the whole call instead.
-        response = call_with_timeout(_call, CALL_TIMEOUT_SECONDS)
+        # Wrapped in call_with_overload_retry so a transient 503 "high
+        # demand" error gets a couple of automatic short-wait retries
+        # before this file counts it as a real failure — see that
+        # function's own docstring for why this is deliberately NOT the
+        # same handling as the 429 quota error below.
+        response = quota.call_with_overload_retry(
+            lambda: call_with_timeout(_call, CALL_TIMEOUT_SECONDS), label=source_hint
+        )
     except Exception as e:
         # Check for an auth/permission failure defensively (by status code,
         # not by exception class) — a previous version only caught

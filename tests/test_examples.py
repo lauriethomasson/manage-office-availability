@@ -953,6 +953,136 @@ def check_daily_quota_short_circuits_remaining_bare_name_lookups(failures):
     failures.extend(local_failures)
 
 
+def check_gemini_overload_retry(failures):
+    """Targeted regression test for extraction.quota.call_with_overload_retry
+    — added on request to automatically retry a Gemini 503 UNAVAILABLE
+    ("the model is overloaded, please try again later") error a couple
+    of times, with a short wait in between, before surfacing it as a
+    real failure. Deliberately distinct from a 429 daily-quota error
+    (extraction.quota.is_quota_exceeded), which fails identically on
+    every immediate retry and must NOT be retried at all here.
+
+    Pure function test against fake exception objects shaped like the
+    real google-genai ServerError/ClientError (a `code` attribute plus a
+    message string) — no live Gemini call needed. quota.time is swapped
+    for a call-counting fake so the test doesn't actually wait through
+    the real 5s/15s retry delays. Covers three cases: (1) a transient
+    503 that succeeds on the first retry, (2) a persistent 503 that
+    still fails after every retry and must re-raise, not swallow, the
+    final error, (3) a 429 that must propagate on the very first
+    attempt with zero retries/waits at all."""
+    from extraction import quota as quota_module
+
+    class FakeOverloadedError(Exception):
+        code = 503
+
+        def __str__(self):
+            return "503 UNAVAILABLE. The model is overloaded. Please try again later."
+
+    class FakeQuotaError(Exception):
+        code = 429
+
+        def __str__(self):
+            return "429 RESOURCE_EXHAUSTED."
+
+    class FakeTime:
+        def __init__(self):
+            self.sleep_calls = []
+
+        def sleep(self, seconds):
+            self.sleep_calls.append(seconds)
+
+    local_failures = []
+    original_time = quota_module.time
+
+    # Case 1: one transient 503, then success — must retry and return the
+    # real result, waiting once (the first configured wait) beforehand.
+    calls = {"n": 0}
+
+    def flaky_once():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FakeOverloadedError()
+        return "ok"
+
+    fake_time = FakeTime()
+    quota_module.time = fake_time
+    log_calls = []
+    try:
+        result = quota_module.call_with_overload_retry(flaky_once, log=log_calls.append, label="Test Building")
+    finally:
+        quota_module.time = original_time
+
+    if result != "ok":
+        local_failures.append(f"expected call_with_overload_retry to return 'ok' after one 503 retry, got {result!r}")
+    if calls["n"] != 2:
+        local_failures.append(f"expected fn() called exactly twice (1 failure + 1 success), got {calls['n']}")
+    if fake_time.sleep_calls != [quota_module.OVERLOAD_RETRY_WAITS_SECONDS[0]]:
+        local_failures.append(f"expected exactly one wait of {quota_module.OVERLOAD_RETRY_WAITS_SECONDS[0]}s, got {fake_time.sleep_calls}")
+    if not log_calls or "Test Building" not in log_calls[0] or "503" not in log_calls[0]:
+        local_failures.append(f"expected a retry log message naming the label and mentioning 503, got {log_calls}")
+
+    # Case 2: persistent 503 across every attempt — must re-raise the real
+    # error after exhausting all retries, not swallow it or return None.
+    calls2 = {"n": 0}
+
+    def always_overloaded():
+        calls2["n"] += 1
+        raise FakeOverloadedError()
+
+    fake_time2 = FakeTime()
+    quota_module.time = fake_time2
+    raised = False
+    try:
+        try:
+            quota_module.call_with_overload_retry(always_overloaded, log=lambda m: None)
+        except FakeOverloadedError:
+            raised = True
+    finally:
+        quota_module.time = original_time
+
+    expected_attempts = len(quota_module.OVERLOAD_RETRY_WAITS_SECONDS) + 1
+    if not raised:
+        local_failures.append("expected a persistent 503 to re-raise after exhausting all retries, got no exception")
+    if calls2["n"] != expected_attempts:
+        local_failures.append(f"expected exactly {expected_attempts} total attempts before giving up, got {calls2['n']}")
+    if fake_time2.sleep_calls != list(quota_module.OVERLOAD_RETRY_WAITS_SECONDS):
+        local_failures.append(f"expected waits of {list(quota_module.OVERLOAD_RETRY_WAITS_SECONDS)}, got {fake_time2.sleep_calls}")
+
+    # Case 3: a 429 daily-quota error must propagate immediately — zero
+    # retries, zero waits, since retrying it would just fail identically.
+    calls3 = {"n": 0}
+
+    def quota_exhausted_call():
+        calls3["n"] += 1
+        raise FakeQuotaError()
+
+    fake_time3 = FakeTime()
+    quota_module.time = fake_time3
+    raised3 = False
+    try:
+        try:
+            quota_module.call_with_overload_retry(quota_exhausted_call, log=lambda m: None)
+        except FakeQuotaError:
+            raised3 = True
+    finally:
+        quota_module.time = original_time
+
+    if not raised3:
+        local_failures.append("expected a 429 quota error to propagate on the first attempt (not be treated as retryable), got no exception")
+    if calls3["n"] != 1:
+        local_failures.append(f"expected exactly 1 attempt for a 429 (no retries at all), got {calls3['n']}")
+    if fake_time3.sleep_calls:
+        local_failures.append(f"expected zero waits for a 429 (never retried), got {fake_time3.sleep_calls}")
+
+    if not local_failures:
+        print(
+            "OK  Gemini 503 overload retry: succeeds after a transient 503, re-raises after a persistent one, "
+            "never retries a 429"
+        )
+    failures.extend(local_failures)
+
+
 def check_contacts_include_phone_email(failures):
     """Targeted regression test for a class of gap a 2026-07 audit found
     across MetSpace, GPE, and Breezblok, prompted by Knotel's own earlier
@@ -1344,6 +1474,7 @@ def main():
     check_llm_prompt_handles_ranges_and_price_tiers(failures)
     check_batch_deadline_stops_remaining_lookups(failures)
     check_daily_quota_short_circuits_remaining_bare_name_lookups(failures)
+    check_gemini_overload_retry(failures)
     check_contacts_include_phone_email(failures)
     check_bc_records(failures)
     check_breezblok_records(failures)
