@@ -7,6 +7,7 @@ had to begin with.
 """
 import json
 import os
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -70,9 +71,63 @@ MAX_EMPTY_METADATA_RETRIES = 3
 # extraction.llm_fallback's own CALL_TIMEOUT_SECONDS for why google-genai's
 # http_options.timeout isn't enough on its own. Smaller than that one
 # since this call can happen up to MAX_EMPTY_METADATA_RETRIES times per
-# lookup — worst case ~75s across all attempts, still comfortably under
-# gunicorn's 120s.
+# lookup — worst case ~75s across all attempts before _throttle_rpm below
+# existed. With it, per-building worst case is no longer a fixed number:
+# it also depends on how much of the shared per-minute budget (see
+# RPM_LIMIT) other buildings in the same batch have already used. A batch
+# with several ambiguous buildings can now legitimately take much longer
+# overall — that's the accepted trade-off for getting real answers
+# instead of 429s (see RPM_LIMIT's own comment) — but it does mean a
+# large enough batch can still risk gunicorn's 120s request timeout
+# (render.yaml). Not solved here; worth revisiting (e.g. an overall
+# per-batch deadline that stops attempting further web-search lookups and
+# falls back to bare Nominatim once time is running out) if that turns
+# out to happen in practice.
 CALL_TIMEOUT_SECONDS = 25
+
+# Confirmed (2026-07, live Render logs) that Gemini's free tier enforces a
+# separate, much tighter cap for this model on top of the per-day one
+# already handled by extraction.quota:
+# GenerateRequestsPerMinutePerProjectPerModel-FreeTier, limit 5. Every
+# real API call this module makes shares this one project-wide budget —
+# the first attempt for one building, an immediate flaky-metadata retry
+# (MAX_EMPTY_METADATA_RETRIES above), and the first attempt for the next
+# building in the same batch are all indistinguishable to Google's
+# limiter. Without throttling, a single ambiguous building needing all
+# MAX_EMPTY_METADATA_RETRIES attempts can burn most or all of this budget
+# within seconds, so later buildings in the same batch then hit a real
+# 429 instead of a genuine "can't find this address" for that building.
+# _throttle_rpm enforces this as an actual rolling 60s window rather than
+# a fixed delay before every call, so a batch with few or no flaky
+# buildings pays no extra latency at all.
+RPM_LIMIT = 5
+RPM_WINDOW_SECONDS = 60.0
+_recent_request_times = []
+
+
+def _throttle_rpm():
+    """Blocks until making another real Gemini call would keep this
+    process's own recent call count at or under RPM_LIMIT within any
+    trailing RPM_WINDOW_SECONDS window. Module-level state (like
+    extraction.geocode._throttle's own _last_request_at) rather than
+    per-batch — this app runs as a single gunicorn worker (render.yaml),
+    and the limit itself is per-project, not per-request, so state needs
+    to persist across separate /api/process calls too, not just within
+    one."""
+    global _recent_request_times
+    now = time.monotonic()
+    _recent_request_times = [t for t in _recent_request_times if now - t < RPM_WINDOW_SECONDS]
+    if len(_recent_request_times) >= RPM_LIMIT:
+        wait = RPM_WINDOW_SECONDS - (now - _recent_request_times[0])
+        if wait > 0:
+            print(
+                f"[address_lookup] at gemini-2.5-flash's free-tier {RPM_LIMIT}/min "
+                f"limit — waiting {wait:.1f}s before the next call"
+            )
+            time.sleep(wait)
+        now = time.monotonic()
+        _recent_request_times = [t for t in _recent_request_times if now - t < RPM_WINDOW_SECONDS]
+    _recent_request_times.append(time.monotonic())
 
 
 def find_address(building_name, provider_name=None, context_hint="a commercial office building in London, UK"):
@@ -170,13 +225,17 @@ def _search(building_name, provider_name, context_hint):
     other kind of failure (network, no key, no chunks) — see
     extraction.quota.is_quota_exceeded.
 
-    Retries immediately, within this single call, up to
-    MAX_EMPTY_METADATA_RETRIES times when a confident answer comes back
-    with completely empty grounding metadata (see the flakiness note
-    below) — confirmed on real Render logs that the search itself is
-    usually already correct in this case, it's specifically the metadata
-    that's sometimes missing, so a fresh attempt right away resolves it
-    far more often than not. Only returns flaky=True (letting
+    Retries within this single call, up to MAX_EMPTY_METADATA_RETRIES
+    times, when a confident answer comes back with completely empty
+    grounding metadata (see the flakiness note below) — confirmed on real
+    Render logs that the search itself is usually already correct in this
+    case, it's specifically the metadata that's sometimes missing, so a
+    fresh attempt resolves it far more often than not. Each attempt (this
+    one and every other real call this module makes, including the first
+    attempt for a different building later in the same batch) goes
+    through _throttle_rpm first, so "a fresh attempt" here means paced to
+    Gemini's shared per-minute free-tier limit, not literally instant —
+    see RPM_LIMIT's own comment for why. Only returns flaky=True (letting
     find_address's own cross-run miss-counter take over) once every
     retry within this call has also come back with no metadata."""
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -227,6 +286,10 @@ def _search(building_name, provider_name, context_hint):
         )
 
     for attempt in range(1, MAX_EMPTY_METADATA_RETRIES + 1):
+        # Shared per-minute budget, not per-building — see RPM_LIMIT's own
+        # comment for why this one call site covers both an immediate
+        # retry for this building and the first attempt for the next one.
+        _throttle_rpm()
         try:
             # Hard, independent wall-clock deadline per attempt — see
             # extraction.llm_fallback's own call_with_timeout usage for why
@@ -284,11 +347,13 @@ def _search(building_name, provider_name, context_hint):
         # Titchfield Street W1W 8BF, Kent House -> 17 Market Place W1W
         # 8AJ). This is API-side flakiness in whether grounding metadata
         # is populated, not evidence the answer is unsupported — retry
-        # immediately rather than giving up on the first flaky response.
+        # (subject to _throttle_rpm's shared per-minute pacing at the top
+        # of this loop, not truly instant anymore) rather than giving up
+        # on the first flaky response.
         if attempt < MAX_EMPTY_METADATA_RETRIES:
             print(
                 f"[address_lookup] '{building_name}' -> '{address}' but grounding metadata had "
-                f"no chunks at all (attempt {attempt}/{MAX_EMPTY_METADATA_RETRIES}) — retrying immediately"
+                f"no chunks at all (attempt {attempt}/{MAX_EMPTY_METADATA_RETRIES}) — retrying"
             )
             continue
 
