@@ -692,6 +692,55 @@ def check_geocode_same_building_ambiguity(failures):
     failures.extend(local_failures)
 
 
+def check_source_filename_disambiguation(failures):
+    """Targeted regression test for app._disambiguate_source_filename.
+
+    Confirmed real bug (2026-07, a real UNION file — sent as a raw .xlsx
+    with no dedicated rule, going through the LLM fallback): app.py's
+    /api/process route reuses the same collision-free `name` for both
+    the copied original source artifact and the generated spreadsheet
+    (always "{name}.xlsx"). When the ORIGINAL upload is itself .xlsx,
+    both resolved to the exact same path in batch_dir — shutil.copy2
+    wrote the real source there first, but write_xlsx later in the same
+    loop then silently overwrote that exact file with the GENERATED
+    spreadsheet. Link to File ended up pointing at a second copy of the
+    output spreadsheet instead of the real original document, for every
+    row — confirmed live via the real running app: before this fix, the
+    hyperlink's own target pointed at "batch_id/UNION.xlsx" (the output)
+    for a file named "UNION.xlsx"; after this fix, it correctly points
+    at "batch_id/UNION (original).xlsx" (21,238 bytes, byte-for-byte the
+    real upload) instead.
+
+    Pure function test — no Flask request or real file needed, since the
+    fix is a pure string transform independent of everything else in the
+    route."""
+    cases = [
+        # The real collision case: an .xlsx source resolves to the exact
+        # same name as the generated spreadsheet — must be disambiguated.
+        ("UNION.xlsx", "UNION.xlsx", "UNION (original).xlsx"),
+        # No collision at all (.eml's own extracted-HTML path, or any
+        # other source extension that isn't literally .xlsx) — must be
+        # left untouched.
+        ("MetSpace.html", "MetSpace.xlsx", "MetSpace.html"),
+        ("BC Current Availability.pdf", "BC Current Availability.xlsx", "BC Current Availability.pdf"),
+        # A name with no extension at all (defensive — not expected in
+        # practice, every real source/output name has one) must still
+        # get a distinguishing suffix, not silently pass through unchanged.
+        ("noext", "noext", "noext (original)"),
+    ]
+    local_failures = []
+    for source_filename, output_filename, expected in cases:
+        result = app_module._disambiguate_source_filename(source_filename, output_filename)
+        if result != expected:
+            local_failures.append(
+                f"_disambiguate_source_filename({source_filename!r}, {output_filename!r}) "
+                f"expected {expected!r}, got {result!r}"
+            )
+    if not local_failures:
+        print(f"OK  source filename disambiguation: {len(cases)} cases (1 real collision, 3 non-colliding) spot-checked")
+    failures.extend(local_failures)
+
+
 def check_html_images_for_llm_fallback(failures):
     """Targeted regression test for extraction.html_images — the generic
     Floor Plan/High Res Images/Brochure PDF enrichment for a brand-new
@@ -1470,6 +1519,7 @@ def main():
     check_street_address_only(failures)
     check_names_only(failures)
     check_geocode_same_building_ambiguity(failures)
+    check_source_filename_disambiguation(failures)
     check_html_images_for_llm_fallback(failures)
     check_llm_prompt_handles_ranges_and_price_tiers(failures)
     check_batch_deadline_stops_remaining_lookups(failures)

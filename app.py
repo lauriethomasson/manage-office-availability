@@ -268,11 +268,12 @@ def process():
             # original uploaded file as-is.
             source_path = r["_source_path"]
             email_html = r.get("email_html")
+            source_filename = f"{name}.html" if email_html else f"{name}{source_path.suffix.lower()}"
+            source_filename = _disambiguate_source_filename(source_filename, r["output_file"])
+
             if email_html:
-                source_filename = f"{name}.html"
                 (batch_dir / source_filename).write_text(email_html, encoding="utf-8")
             else:
-                source_filename = f"{name}{source_path.suffix.lower()}"
                 shutil.copy2(source_path, batch_dir / source_filename)
             r["source_file"] = source_filename
             source_url = _download_url(batch_id, source_filename)
@@ -358,6 +359,33 @@ def process():
         return jsonify({"batch_id": batch_id, "files": response_files})
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _disambiguate_source_filename(source_filename, output_filename):
+    """Returns source_filename unchanged unless it exactly matches
+    output_filename (the generated spreadsheet's own name, always
+    "{name}.xlsx") — in which case a distinguishing " (original)" suffix
+    is inserted before the extension.
+
+    Confirmed via a real report (2026-07, a UNION file — sent as a raw
+    .xlsx with no dedicated rule, going through the LLM fallback): reusing
+    the exact same collision-free `name` for both the copied source
+    artifact and the generated spreadsheet collides whenever the
+    ORIGINAL upload is itself .xlsx — both would resolve to the identical
+    path in batch_dir. shutil.copy2 (in the caller, below) would write the
+    real source there first, but write_xlsx further down that same loop
+    then silently overwrites that exact file with the GENERATED
+    spreadsheet, so Link to File ends up pointing at a second copy of the
+    output file instead of the real original, for every row. Only .xlsx
+    can actually collide today (an .eml's own extracted-HTML path always
+    gets .html; every other format keeps its own distinct extension), but
+    this is written generically rather than hardcoded to ".xlsx", so it
+    stays correct if the generated spreadsheet's own extension ever
+    changes."""
+    if source_filename != output_filename:
+        return source_filename
+    stem, dot, ext = source_filename.rpartition(".")
+    return f"{stem} (original).{ext}" if dot else f"{source_filename} (original)"
 
 
 def _download_url(batch_id, filename):
