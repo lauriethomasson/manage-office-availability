@@ -57,6 +57,11 @@ button#processBtn:disabled { background: #2a2d36; color: #6b7280; cursor: not-al
 .badge.error { background: #3a1f1f; color: #ff6b6b; }
 .method { color: #9aa0a6; font-size: 12px; }
 .summary-line { margin: 10px 0; font-size: 14px; }
+.quota-notice {
+  font-size: 12px; color: #8ab4ff; background: #131a2b; border: 1px solid #223055;
+  border-radius: 6px; padding: 8px 12px; margin: 0 0 14px; line-height: 1.5;
+}
 .error-text { color: #ff8a8a; font-size: 12px; }
+.warning-text { color: #f5c563; font-size: 12px; }
 .download-link { color: #8ab4ff; text-decoration: none; font-weight: 600; }
 .download-link:hover { text-decoration: underline; }

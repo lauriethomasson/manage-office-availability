@@ -157,12 +157,33 @@ processBtn.addEventListener("click", async () => {
   }
 });
 
+// Only shown when at least one file in this batch actually carries a
+// warning — Gemini's free-tier address-search quota (extraction.quota/
+// extraction.address_lookup) being hit partway through, or the batch
+// deadline (extraction.pipeline.BATCH_DEADLINE_SECONDS) being reached
+// before every ambiguous building could be looked up — so it only
+// appears when it's actually relevant to this batch, not on every run.
+// Deliberately calm/informational wording and styling (.quota-notice,
+// not .warning-text's amber or an alarming red) since this is expected
+// behavior for a free service, not something gone wrong.
+const QUOTA_NOTICE =
+  "Some addresses may need manual lookup due to daily limits on our free address-search " +
+  "service, or occasional delays when it's busy. This is normal and not an error — see the " +
+  "notes below for which file(s) this affected.";
+
 function renderResults(data) {
   const okCount = data.files.filter((f) => f.status === "ok").length;
   const summary = document.createElement("div");
   summary.className = "summary-line";
   summary.textContent = `Generated ${okCount} spreadsheet(s) from ${data.files.length} file(s).`;
   resultsEl.appendChild(summary);
+
+  if (data.files.some((f) => f.warning)) {
+    const notice = document.createElement("div");
+    notice.className = "quota-notice";
+    notice.textContent = QUOTA_NOTICE;
+    resultsEl.appendChild(notice);
+  }
 
   const table = document.createElement("table");
   table.innerHTML = `
@@ -188,15 +209,20 @@ function renderResults(data) {
     // warning — e.g. Gemini's daily address-search quota was hit partway
     // through, so some rows fell back further than usual. error always
     // wins when both are somehow set (it isn't in practice: pipeline only
-    // ever sets one or the other for a given file).
+    // ever sets one or the other for a given file). Styled distinctly from
+    // a real error (.warning-text's amber vs .error-text's red) — a
+    // warning here means the file itself extracted fine, paired with the
+    // general reassurance note above explaining this is expected, not a
+    // sign anything actually went wrong.
     const noteText = f.error || f.warning || "";
+    const noteClass = f.error ? "error-text" : "warning-text";
     tr.innerHTML = `
       <td>${escapeHtml(f.filename)}</td>
       <td><span class="badge ${badgeClass}">${f.status}</span></td>
       <td class="method">${methodLabel}</td>
       <td>${f.record_count}</td>
       <td>${outputCell}</td>
-      <td class="error-text">${noteText ? escapeHtml(noteText) : ""}</td>`;
+      <td class="${noteClass}">${noteText ? escapeHtml(noteText) : ""}</td>`;
     tbody.appendChild(tr);
   });
 
