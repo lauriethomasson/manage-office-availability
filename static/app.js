@@ -3,9 +3,20 @@ const fileInput = document.getElementById("fileInput");
 const fileListEl = document.getElementById("fileList");
 const processBtn = document.getElementById("processBtn");
 const statusEl = document.getElementById("status");
+const statusExtraEl = document.getElementById("statusExtra");
 const resultsEl = document.getElementById("results");
 
 let selectedFiles = [];
+
+// Purely a UI-timing reassurance, not tied to file size — a small file with
+// several ambiguous addresses needing extra web-search lookups (see
+// extraction.address_lookup's rate-limit pacing) can take just as long as a
+// large one, so this fires whenever the request itself is still running
+// after this delay, regardless of why.
+const SLOW_MESSAGE_DELAY_MS = 12000;
+const SLOW_MESSAGE =
+  "Larger or more complex files can take longer to process, especially ones with several " +
+  "addresses that need extra lookups. This can take up to a couple of minutes — please don't close this page.";
 
 // Shown for any failure that isn't a clean per-file error from the server
 // (server crash/500, gateway timeout page, malformed/non-JSON response,
@@ -24,6 +35,10 @@ const NETWORK_ERROR_MESSAGE =
 function setStatus(text, isError) {
   statusEl.textContent = text;
   statusEl.classList.toggle("error", !!isError);
+}
+
+function setStatusExtra(text) {
+  statusExtraEl.textContent = text || "";
 }
 
 dropzone.addEventListener("click", () => fileInput.click());
@@ -81,7 +96,13 @@ processBtn.addEventListener("click", async () => {
 
   processBtn.disabled = true;
   setStatus(`Processing ${selectedFiles.length} file(s)…`, false);
+  setStatusExtra("");
   resultsEl.innerHTML = "";
+
+  // Only shown if the request is still in flight after this delay — cleared
+  // in `finally` below the moment processing settles, one way or the other,
+  // so it never lingers alongside a "Done." or error message.
+  const slowTimer = setTimeout(() => setStatusExtra(SLOW_MESSAGE), SLOW_MESSAGE_DELAY_MS);
 
   try {
     let res;
@@ -130,6 +151,8 @@ processBtn.addEventListener("click", async () => {
     selectedFiles = [];
     renderFileList();
   } finally {
+    clearTimeout(slowTimer);
+    setStatusExtra("");
     processBtn.disabled = selectedFiles.length === 0;
   }
 });
