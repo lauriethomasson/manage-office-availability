@@ -312,12 +312,18 @@ def check_knotel_records(failures):
     note in the 13/07 email must land on exactly the two 15 Hatfields
     rows it names and nowhere else — checked against both fixtures so a
     regression that leaked it onto an unrelated row, or dropped it
-    entirely, both fail); and Brochure PDF (pins two real, confirmed
-    source-HTML quirks that would otherwise silently drop a genuine
-    brochure link — "View brochure" with inconsistent casing for 33 Soho,
-    and text/href entirely reversed for 23 Great Titchfield Street — plus
-    Rufus House, which has no brochure button in the source at all and
-    must stay blank rather than picking up a neighboring listing's link)."""
+    entirely, both fail); and Brochure PDF, which now prefers a real,
+    working knotel.com "View property"/"View Listing" link over "View
+    Brochure" itself (confirmed real, 2026-07: "View Brochure" always
+    points at pitch.com, a JS-rendered viewer, not a real fetchable
+    document) — pins this for Rufus House specifically, which has no
+    "View Brochure" button in the source at all but DOES have a real
+    "View property" link, so the correct value here is that knotel.com
+    link, not blank; also still exercises (indirectly — see
+    extraction.rules.knotel._group_items) two real, confirmed
+    source-HTML quirks that would otherwise silently drop a link
+    entirely — "View brochure" with inconsistent casing for 33 Soho, and
+    text/href entirely reversed for 23 Great Titchfield Street."""
     # Pinned by list index — parse() order is deterministic for a fixed,
     # checked-in source file, and several of these buildings share the
     # same Area and Floor/Unit label as each other (e.g. three different
@@ -335,39 +341,42 @@ def check_knotel_records(failures):
                     building="The Hallmark Building, 106 Fenchurch St, London EC3M 5JE",
                     floor="Hallmark 6th Floor",
                     postcode="EC3M 5JE",
-                    brochure="https://pitch.com/v/hallmark-6th-floor-jdfuuc",
+                    brochure="https://knotel.com/offices/london/hallmark/u/hallmark-6th-floor",
                 ),
                 4: dict(
                     building="Classic House, 174-180 Martha's Buildings, Old St, London EC1V 9BP",
                     floor="2nd Floor",
                     postcode="EC1V 9BP",
-                    brochure="https://pitch.com/v/classic-house-8ft3xk",
+                    brochure="https://knotel.com/offices/london/classic-house/u/2nd-floor",
                 ),
                 5: dict(
                     building="Gilray House, 146-150 City Rd, London EC1V 2RL",
                     floor="3rd Floor",
                     postcode="EC1V 2RL",
-                    brochure="https://pitch.com/v/gilray-house-qg4d3k",
+                    brochure="https://knotel.com/offices/london/gilray-house/u/3rd-floor",
                 ),
                 6: dict(
                     building="Gilray House, 146-150 City Rd, London EC1V 2RL",
                     floor="4th Floor",
                     postcode="EC1V 2RL",
-                    brochure="https://pitch.com/v/gilray-house-qg4d3k",
+                    brochure="https://knotel.com/offices/london/gilray-house/u/4th-floor",
                 ),
                 7: dict(
                     building="Rufus House, 2-4 Rufus St, London N1 6PE",
                     floor="2nd Floor",
                     postcode="N1 6PE",
                     # No "View Brochure" button for this listing at all in
-                    # the real source — blank is the honest, correct value.
-                    brochure="",
+                    # the real source, but it DOES have a real "View
+                    # property" knotel.com link — _best_brochure_link
+                    # correctly falls through to that instead of leaving
+                    # this blank now that a real alternative exists.
+                    brochure="https://knotel.com/offices/london/rufus-house/u/2nd-floor",
                 ),
                 9: dict(
                     building="15 Hatfields, Chadwick Court, London SE1 8DJ",
                     floor="15 Hatfields - 1st Floor",
                     postcode="SE1 8DJ",
-                    brochure="https://pitch.com/v/15-hatfield-wajq9e",
+                    brochure="https://knotel.com/offices/london/15-hatfields/u/1stfloor",
                     # No price-drop promo in this older email at all.
                     special_features="",
                 ),
@@ -375,30 +384,35 @@ def check_knotel_records(failures):
                     building="15 Hatfields, Chadwick Court, London SE1 8DJ",
                     floor="15 Hatfields - 3rd Floor",
                     postcode="SE1 8DJ",
-                    brochure="https://pitch.com/v/15-hatfield-wajq9e",
+                    brochure="https://knotel.com/offices/london/15-hatfields/u/3rd-floor",
                     special_features="",
                 ),
                 11: dict(
                     building="7 Howick Place, 7 Howick Pl, London SW1P 1BB",
                     floor="3rd Floor",
                     postcode="SW1P 1BB",
-                    brochure="https://app.pitch.com/app/presentation/3761848b-50da-445a-9e78-49e665889bfb/6572cd6a-3cbe-414b-8d46-a16f9cf6d02a",
+                    brochure="https://knotel.com/offices/london/7-howick-place/u/3rd-floor",
                 ),
                 12: dict(
                     building="23 Great Titchfield Street, 23 Great Titchfield St London W1W 7JA",
                     floor="3B",
                     postcode="W1W 7JA",
-                    # Real source HTML has this one anchor's text/href
-                    # entirely reversed (href literally = "View Brochure",
-                    # visible text = the real URL) — this pins the recovered
-                    # real link, not the swapped placeholder.
-                    brochure="https://pitch.com/v/23-great-titchfield-street-c6ahp2",
+                    # Real source HTML has this listing's own "View Brochure"
+                    # anchor text/href entirely reversed (href literally =
+                    # "View Brochure", visible text = the real pitch.com
+                    # URL) — _group_items still recovers that correctly, but
+                    # _best_brochure_link now prefers this listing's real,
+                    # working knotel.com "View property" link over it either
+                    # way (confirmed real, 2026-07: "View Brochure" always
+                    # points at pitch.com, a JS-rendered viewer, not a real
+                    # fetchable document).
+                    brochure="https://knotel.com/offices/london/great-titchfield-street/u/3b",
                 ),
                 14: dict(
                     building="Market Exchange, 8 Macklin Street, Covent Garden WC2",
                     floor="2nd - East Wing",
                     postcode="",
-                    brochure="https://pitch.com/v/market-exchange-brochure-8quwwk",
+                    brochure="https://knotel.com/offices/london/market-exchange/u/part-2nd",
                 ),
             },
         ),
@@ -410,7 +424,7 @@ def check_knotel_records(failures):
                     building="15 Hatfields, Chadwick Court, London SE1 8DJ",
                     floor="15 Hatfields - 1st Floor",
                     postcode="SE1 8DJ",
-                    brochure="https://pitch.com/v/15-hatfield-wajq9e",
+                    brochure="https://knotel.com/offices/london/15-hatfields/u/1stfloor",
                     # The real promo note for this exact row/price — must
                     # match the "1st Floor" price, not the "3rd Floor" one.
                     special_features="Price drop: now £120 psf",
@@ -419,18 +433,21 @@ def check_knotel_records(failures):
                     building="15 Hatfields, Chadwick Court, London SE1 8DJ",
                     floor="15 Hatfields - 3rd Floor",
                     postcode="SE1 8DJ",
-                    brochure="https://pitch.com/v/15-hatfield-wajq9e",
+                    brochure="https://knotel.com/offices/london/15-hatfields/u/3rd-floor",
                     special_features="Price drop: now £115 psf",
                 ),
                 # The exact regression case: two adjacent West End listings
                 # with genuinely different buildings — "33 Soho" must not
                 # leak onto the "Market Exchange" row that follows it. Also
-                # covers the "View brochure" (lowercase b) casing quirk.
+                # covers the "View brochure" (lowercase b) casing quirk
+                # (_group_items still recovers it correctly internally, even
+                # though _best_brochure_link now prefers this listing's real
+                # knotel.com "View property" link over it either way).
                 13: dict(
                     building="33 soho square, W1D 3QU",
                     floor="2nd Floor",
                     postcode="W1D 3QU",
-                    brochure="https://pitch.com/v/33-soho-square-w1d-7i96p7",
+                    brochure="https://knotel.com/offices/london/33-soho-square/u/2nd-floor",
                 ),
                 14: dict(
                     building="Market Exchange, 8 Macklin Street, Covent Garden WC2",
@@ -439,7 +456,7 @@ def check_knotel_records(failures):
                     # outward-only postcode ("WC2", no inward part) — "" is
                     # the honest, correct extraction here, not a bug.
                     postcode="",
-                    brochure="https://pitch.com/v/market-exchange-brochure-8quwwk",
+                    brochure="https://knotel.com/offices/london/market-exchange/u/part-2nd",
                 ),
             },
         ),

@@ -25,12 +25,18 @@ Contacts is a fixed, whole-email value (_contact_block) — Knotel gives no
 individual broker name, only a shared team contact in the intro
 paragraph. Special Features carries a per-floor price-drop note when the
 intro also flags one (_price_drop_notes) — otherwise blank. Brochure PDF
-comes from each listing's own "View Brochure" link/button (_group_items)
-— distinct from Link to File, which app.py always overwrites with the
-persisted source file link regardless of what this rule sets.
+prefers a real, working knotel.com link ("View property"/"View Listing")
+over "View Brochure" itself (_best_brochure_link) — confirmed real
+(2026-07) that "View Brochure" always points at pitch.com, a JS-rendered
+viewer that returns an HTML page when fetched directly, never real PDF
+bytes, the same already-confirmed-unusable class as Canva/Box.com seen
+elsewhere in this project. Distinct from Link to File, which app.py
+always overwrites with the persisted source file link regardless of
+what this rule sets.
 """
 import re
 
+from extraction.html_images import is_low_trust_link_domain
 from extraction.text_utils import titlecase_area
 
 AREA_RE = re.compile(r"^[A-Z][A-Z ]+$")
@@ -251,7 +257,7 @@ def parse(content):
                     "Marketing Price (Based on Min Term) PSF": _strip_units(price_psf, "per sqft"),
                     "Special Features": _price_drop_note_for(price_drop_notes, current_building, floor),
                     "Contacts": contact,
-                    "Brochure PDF": group.get("brochure", ""),
+                    "Brochure PDF": _best_brochure_link(group),
                     "Floor Plan": group.get("floorplan", ""),
                     "High Res Images": group.get("highres", ""),
                 }
@@ -259,6 +265,24 @@ def parse(content):
         i += 1
 
     return records
+
+
+def _best_brochure_link(group):
+    """Prefers "View property" (this floor's own specific knotel.com
+    listing page) or "View Listing" (the whole building's knotel.com
+    page, a reasonable fallback when a floor-specific one isn't present)
+    over "View Brochure" itself — confirmed real (2026-07) that "View
+    Brochure" always points at pitch.com, a JS-rendered viewer, not a
+    real fetchable document, the same class of problem already fixed
+    for The Workplace Company's own Brochure/Website columns
+    (extraction.xlsx_links). Falls back to whichever of the three is
+    actually present, in the same preference order, if every present
+    candidate is low-trust — still better than nothing."""
+    candidates = [group.get("property"), group.get("listing"), group.get("brochure")]
+    for url in candidates:
+        if url and not is_low_trust_link_domain(url):
+            return url
+    return next((url for url in candidates if url), "")
 
 
 def _value_after(window, label):
