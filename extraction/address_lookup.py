@@ -14,13 +14,46 @@ from urllib.parse import urlparse
 from . import quota
 from .hard_timeout import call_with_timeout
 
-# Confirmed empirically (2026-07) that Google Search grounding returns
-# 429 RESOURCE_EXHAUSTED on this project's free tier for both
-# gemini-3.1-flash-lite and gemini-2.0-flash (used elsewhere in this repo
-# for plain, non-grounded extraction) — only gemini-2.5-flash actually
-# has free grounding quota available. Worth re-checking if this ever
-# starts failing; Google's model/quota lineup for grounding shifts over time.
-MODEL = "gemini-2.5-flash"
+# gemini-2.5-flash (used here previously) started returning 404
+# NOT_FOUND — "no longer available to new users" — some time between the
+# 2026-07 note below and a real Render SIGKILL investigation, also
+# 2026-07 (see extraction.pipeline.BATCH_DEADLINE_SECONDS), confirming
+# Google's model/quota lineup for grounding really does shift over time,
+# as warned. Re-checked every currently-listed flash-tier candidate live
+# at that point: gemini-2.5-flash-lite was ALSO already 404 (dead, not
+# just deprecated-soon), while gemini-3.1-flash-lite/gemini-3.5-flash/
+# gemini-2.0-flash all returned 429 RESOURCE_EXHAUSTED with a "check your
+# plan and billing details" message — consistent with the day's shared
+# grounding quota already being used up by that point (including by the
+# 2.5-flash calls that failed 404 first), not each of those three being
+# individually dead; a 429 (not a 400) also confirms the model accepted
+# the google_search tool at all, it just had no quota left for it today.
+# gemini-3.1-flash-lite is the pick, not just "any surviving candidate":
+# it's the one already confirmed live and working on this exact API key
+# (extraction.llm_fallback uses it successfully for plain extraction,
+# same key/account), and this repo's own llm_fallback.py comment already
+# documents it as "explicitly positioned for high-volume, cost-sensitive
+# traffic" with "a much more generous free-tier daily quota" than
+# gemini-3.5-flash's own 20-requests/day cap — both good reasons for a
+# batch job doing many per-building lookups, not just "oldest surviving
+# model" reasoning (which the 2.5-flash/2.5-flash-lite cutoff already
+# disproves as a reliable signal — that purge hit an entire generation
+# regardless of age relative to 3.x). Re-verify this still returns real
+# results (not another 429) once a fresh day's grounding quota is
+# available — this swap could not be confirmed working end-to-end for
+# grounding specifically at the time it was made, only that it returned
+# a quota error rather than a dead-model error.
+#
+# Prior note (2026-07, now superseded): "Confirmed empirically that
+# Google Search grounding returns 429 RESOURCE_EXHAUSTED on this
+# project's free tier for both gemini-3.1-flash-lite and gemini-2.0-flash
+# (used elsewhere in this repo for plain, non-grounded extraction) — only
+# gemini-2.5-flash actually has free grounding quota available." That
+# note's own gemini-3.1-flash-lite 429 and today's are indistinguishable
+# from here (both just "quota exhausted") — can't rule out this model
+# having genuinely near-zero free grounding quota specifically, as
+# opposed to 2.0-flash; only a fresh-quota re-test will tell for sure.
+MODEL = "gemini-3.1-flash-lite"
 NOT_FOUND = "NOT_FOUND"
 
 # Confirmed (2026-07) that a single-source grounded answer can still be
@@ -269,12 +302,15 @@ def _search(building_name, provider_name, context_hint):
         return client.models.generate_content(
             model=MODEL,
             contents=prompt,
-            # No thinking_config here — gemini-2.5-flash rejects
-            # thinking_level (that param is for the newer 3.x models used
-            # elsewhere in this repo); this model's defaults are fine for
-            # a short lookup like this.
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
+                # Unlike gemini-2.5-flash (used here previously, which
+                # rejected thinking_level outright), gemini-3.1-flash-lite
+                # does support thinking_config — same as extraction.
+                # llm_fallback's own equivalent call — so set it here too,
+                # for the same reason: keep the token budget on the actual
+                # answer, not hidden reasoning, for a lookup this short.
+                thinking_config=types.ThinkingConfig(thinking_level="low"),
                 # Also set, but confirmed (2026-07, via a real Render
                 # crash on extraction.llm_fallback's own equivalent call)
                 # NOT sufficient on its own for a call whose response can

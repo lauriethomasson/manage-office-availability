@@ -19,7 +19,9 @@ from extraction import geocode as geocode_module
 from extraction import html_images
 from extraction.llm_fallback import _build_prompt
 from extraction import pdf_images
+from extraction import pipeline as pipeline_module
 import app as app_module
+import time
 
 EXPECTATIONS = [
     ("Fw_ Knotel Availability _ 30_06_2026.eml", "Knotel", 16),
@@ -813,6 +815,144 @@ def check_llm_prompt_handles_ranges_and_price_tiers(failures):
     failures.extend(local_failures)
 
 
+def check_batch_deadline_stops_remaining_lookups(failures):
+    """Targeted regression test for a real Render SIGKILL (2026-07, "UNION
+    - Availability - June 26 - City 2.xlsx"): a file with many bare-name/
+    ambiguous buildings (Cannon Green, 4 Moorgate, 100 Cannon Street,
+    Broadgate Tower, Chiswell Street, Birchin Lane, HYLO, Royal Exchange,
+    Bow Bells House, Thames Court, and more) racked up enough cumulative
+    extraction.address_lookup._throttle_rpm waiting and per-building
+    retries to blow past gunicorn's own --timeout 120 (render.yaml), and
+    the worker was killed mid-sleep with no response returned at all.
+
+    extraction.pipeline._geocode_records now checks a shared
+    time.monotonic() deadline before EVERY per-building lookup and, once
+    it's passed, stops attempting any further lookups for the rest of
+    the batch — pure function test with find_address_via_web_search/
+    geocode both replaced by call-counting fakes (no live network/LLM
+    needed) and a deadline already in the past, so every record must be
+    skipped with zero lookup calls made at all, not just happen to
+    resolve to the same values a real lookup might."""
+    records = [
+        {"Property Address 1": "Cannon Green", "Property Postcode": ""},
+        {"Property Address 1": "100 Cannon Street", "Property Postcode": ""},
+        {"Property Address 1": "Broadgate Tower", "Property Postcode": "EC2A 2BB"},
+    ]
+    calls = []
+
+    def fake_find_address(building, provider_name):
+        calls.append(("find_address", building))
+        return None, [], False
+
+    def fake_geocode(query, confident=True):
+        calls.append(("geocode", query))
+        return 51.5, -0.1, "EC2A 1AA", None
+
+    original_find = pipeline_module.find_address_via_web_search
+    original_geocode = pipeline_module.geocode
+    pipeline_module.find_address_via_web_search = fake_find_address
+    pipeline_module.geocode = fake_geocode
+    try:
+        past_deadline = time.monotonic() - 1
+        quota_exhausted, deadline_hit = pipeline_module._geocode_records(
+            records, "UNION - Availability - June 26 - City 2.xlsx", "UNION", past_deadline
+        )
+    finally:
+        pipeline_module.find_address_via_web_search = original_find
+        pipeline_module.geocode = original_geocode
+
+    local_failures = []
+    if not deadline_hit:
+        local_failures.append("expected deadline_hit=True when the shared deadline had already passed, got False")
+    if quota_exhausted:
+        local_failures.append("expected quota_exhausted=False (no lookups were ever attempted), got True")
+    if calls:
+        local_failures.append(f"expected zero find_address_via_web_search/geocode calls once the deadline passed, got {calls}")
+    for r in records:
+        if r.get("Lat") != "Needs manual lookup" or r.get("Lng") != "Needs manual lookup":
+            local_failures.append(
+                f"{r['Property Address 1']!r}: expected Lat/Lng 'Needs manual lookup', got Lat={r.get('Lat')!r} Lng={r.get('Lng')!r}"
+            )
+    # A postcode already parsed from the source text (Broadgate Tower's
+    # "EC2A 2BB" above) must survive untouched — only a genuinely missing
+    # Property Postcode should be backfilled with the same manual-lookup flag.
+    if records[0].get("Property Postcode") != "Needs manual lookup":
+        local_failures.append(f"expected a missing Property Postcode to be backfilled to 'Needs manual lookup', got {records[0].get('Property Postcode')!r}")
+    if records[2].get("Property Postcode") != "EC2A 2BB":
+        local_failures.append(f"expected an already-known Property Postcode to be left untouched, got {records[2].get('Property Postcode')!r}")
+    if not local_failures:
+        print(f"OK  batch deadline: {len(records)} records correctly marked Needs manual lookup with zero lookup calls once the deadline passed")
+    failures.extend(local_failures)
+
+
+def check_daily_quota_short_circuits_remaining_bare_name_lookups(failures):
+    """Targeted regression test for the other half of the same real
+    Render incident (2026-07, "UNION - Availability - June 26 - City
+    2.xlsx"): Broadgate Tower and HYLO both hit Gemini's daily 20-request
+    quota (429 RESOURCE_EXHAUSTED) partway through the file's bare-name
+    web-search lookups — every later bare-name building in the same batch
+    was still retrying against the identical exhausted daily quota,
+    wasting real time (extraction.address_lookup's own rate-limit pacing
+    still waits before each attempt) that contributed to the same timeout
+    risk BATCH_DEADLINE_SECONDS exists to guard against.
+
+    Pure function test: find_address_via_web_search replaced with a fake
+    that reports hit_quota=True on every call (so a regression that keeps
+    calling it for every bare-name building is caught), geocode replaced
+    with a call-counting fake standing in for the bare-name Nominatim
+    fallback. Confirms only the FIRST bare-name building's lookup ever
+    reaches find_address_via_web_search — every later one must skip
+    straight to the Nominatim fallback instead."""
+    records = [
+        {"Property Address 1": "Broadgate Tower", "Property Postcode": ""},
+        {"Property Address 1": "HYLO", "Property Postcode": ""},
+        {"Property Address 1": "Royal Exchange", "Property Postcode": ""},
+    ]
+    find_calls = []
+    geocode_calls = []
+
+    def fake_find_address(building, provider_name):
+        find_calls.append(building)
+        return None, [], True
+
+    def fake_geocode(query, confident=True):
+        geocode_calls.append(query)
+        return 51.5, -0.1, "EC2A 1AA", None
+
+    original_find = pipeline_module.find_address_via_web_search
+    original_geocode = pipeline_module.geocode
+    pipeline_module.find_address_via_web_search = fake_find_address
+    pipeline_module.geocode = fake_geocode
+    try:
+        future_deadline = time.monotonic() + 100
+        quota_exhausted, deadline_hit = pipeline_module._geocode_records(
+            records, "UNION - Availability - June 26 - City 2.xlsx", "UNION", future_deadline
+        )
+    finally:
+        pipeline_module.find_address_via_web_search = original_find
+        pipeline_module.geocode = original_geocode
+
+    local_failures = []
+    if not quota_exhausted:
+        local_failures.append("expected quota_exhausted=True after the first bare-name lookup reported hit_quota, got False")
+    if deadline_hit:
+        local_failures.append("expected deadline_hit=False (the deadline is far in the future), got True")
+    if find_calls != ["Broadgate Tower"]:
+        local_failures.append(
+            f"expected find_address_via_web_search called exactly once, for the first bare-name building only "
+            f"(later ones must short-circuit past a known-exhausted daily quota), got {find_calls}"
+        )
+    if len(geocode_calls) != len(records):
+        local_failures.append(
+            f"expected the bare-name Nominatim fallback (geocode) called once per record ({len(records)}), got {len(geocode_calls)}"
+        )
+    if not local_failures:
+        print(
+            f"OK  daily quota short-circuit: {len(records)} bare-name records, only 1 web-search call made after the first hit the daily quota"
+        )
+    failures.extend(local_failures)
+
+
 def check_contacts_include_phone_email(failures):
     """Targeted regression test for a class of gap a 2026-07 audit found
     across MetSpace, GPE, and Breezblok, prompted by Knotel's own earlier
@@ -1202,6 +1342,8 @@ def main():
     check_geocode_same_building_ambiguity(failures)
     check_html_images_for_llm_fallback(failures)
     check_llm_prompt_handles_ranges_and_price_tiers(failures)
+    check_batch_deadline_stops_remaining_lookups(failures)
+    check_daily_quota_short_circuits_remaining_bare_name_lookups(failures)
     check_contacts_include_phone_email(failures)
     check_bc_records(failures)
     check_breezblok_records(failures)

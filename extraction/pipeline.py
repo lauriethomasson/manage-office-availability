@@ -6,6 +6,7 @@ Unlike an earlier version of this module, each file's records stay
 separate (one output spreadsheet per source file, not one combined master).
 """
 import re
+import time
 from datetime import date
 
 from . import memlog, quota
@@ -17,6 +18,26 @@ from .llm_fallback import LLMExtractionError, extract_with_llm
 from .naming import extract_date, resolve_provider_name, resolve_source_date
 from .rules import try_rules
 from .schema import normalize_record, street_address_only
+
+# Confirmed via a real Render SIGKILL (2026-07, "UNION - Availability -
+# June 26 - City 2.xlsx"): gunicorn's own --timeout 120 (render.yaml) is a
+# hard ceiling on the WHOLE request, not just geocoding — file reading,
+# LLM calls, and image attachment for every file in the batch all count
+# against it too. A file with many bare-name/ambiguous buildings can rack
+# up enough cumulative extraction.address_lookup._throttle_rpm waiting
+# and per-building retries to blow straight past that ceiling with no
+# warning — the crash was caught mid-sleep inside _throttle_rpm itself.
+# _geocode_records checks this deadline before EVERY per-building lookup
+# (Nominatim or Gemini) and, once passed, stops attempting further
+# lookups entirely for the rest of the batch — trading address
+# completeness (those rows fall back to "Needs manual lookup", the same
+# honest flag used for any other geocoding gap) for a guaranteed response
+# within the timeout, rather than a silent SIGKILL that returns nothing
+# at all. 100s (not the full 120s) deliberately leaves ~20s of margin for
+# whatever still needs to happen after geocoding finishes — image
+# attachment, spreadsheet writing — for this file and any others already
+# queued in the same batch.
+BATCH_DEADLINE_SECONDS = 100
 
 # A trailing postal district/area code with no inward part (e.g. "W1",
 # "SW1Y", "EC2V") — short enough to be a district code, not a full street
@@ -95,21 +116,39 @@ def _address_retry_candidates(building, digit_address):
     return candidates
 
 
-def process_files(paths):
+def process_files(paths, deadline=None):
     """Returns a list of per-file dicts:
     {filename, status: "ok"|"error", method: "rule:<Name>"|"llm"|None,
      records, record_count, error, warning, provider_name, date}
     provider_name/date/records are only meaningful when status == "ok".
-    warning is set alongside a normal "ok" status/None error — either or
-    both of: a PDF bigger than what's actually been tested end-to-end
+
+    deadline: a time.monotonic() value beyond which _geocode_records stops
+    attempting further per-building lookups for the REST of the batch —
+    see BATCH_DEADLINE_SECONDS above for why. Computed fresh from here
+    (BATCH_DEADLINE_SECONDS from now) if not given, so a caller with no
+    opinion (e.g. tests/test_examples.py's own direct usage) still gets a
+    real safety net; app.py's own /api/process passes one computed at the
+    true start of request handling, before this function is ever called,
+    so time already spent reading files/calling the LLM for an earlier
+    file in the same batch correctly eats into the budget for a later
+    one's geocoding too — this is one shared deadline for the whole
+    batch, not reset per file.
+
+    warning is set alongside a normal "ok" status/None error — any of: a
+    PDF bigger than what's actually been tested end-to-end
     (extraction.file_readers.TESTED_MAX_PDF_PAGES/TESTED_MAX_PDF_BYTES —
     distinct from that module's own hard MAX_PDF_PAGES ceiling, which is
-    a real error instead), and/or a file that extracted successfully but
-    hit Gemini's daily quota partway through its own address-lookup
-    fallback (some rows' Lat/Lng/postcode fell back further than usual,
-    to a less reliable bare-name Nominatim match) — neither is something
-    that failed the file itself.
+    a real error instead), a file that extracted successfully but hit
+    Gemini's daily quota partway through its own address-lookup fallback,
+    and/or one that hit the batch deadline before every building could be
+    looked up — in every case, some rows' Lat/Lng/Property Postcode fell
+    back further than usual (to a less reliable bare-name Nominatim
+    match, or to "Needs manual lookup" outright) — none of these is
+    something that failed the file itself.
     """
+    if deadline is None:
+        deadline = time.monotonic() + BATCH_DEADLINE_SECONDS
+
     results = []
 
     for path in paths:
@@ -214,7 +253,7 @@ def process_files(paths):
         # web-search fallback can pass it along as disambiguating context
         # (e.g. "Elsley GPE Fully Managed" instead of just "Elsley").
         provider_name = resolve_provider_name(rule_name, filename, llm_source_name)
-        quota_exhausted = _geocode_records(normalized, filename, provider_name)
+        quota_exhausted, deadline_hit = _geocode_records(normalized, filename, provider_name, deadline)
 
         # Deliberately AFTER geocoding, not before: _geocode_records (and
         # everything it calls — _geocode_query, _address_retry_candidates,
@@ -246,6 +285,20 @@ def process_files(paths):
             )
             result["warning"] = f"{result['warning']} {quota_note}" if result["warning"] else quota_note
 
+        if deadline_hit:
+            # Same scoping principle as the quota note above — this file's
+            # records still extracted fine, only some rows' address lookup
+            # was skipped once the whole batch's shared time budget ran out
+            # (see BATCH_DEADLINE_SECONDS) rather than risking a SIGKILL
+            # that would have returned nothing for the whole batch instead.
+            deadline_note = (
+                "This file has enough ambiguous buildings that address lookup couldn't finish within the "
+                'time available for this batch. Some rows are marked "Needs manual lookup" that would '
+                "otherwise have been looked up automatically — try processing this file on its own, or in "
+                "a smaller batch, to give it the full time budget."
+            )
+            result["warning"] = f"{result['warning']} {deadline_note}" if result["warning"] else deadline_note
+
         # Prefer the source document's own date (email Date header, or PDF/
         # DOCX metadata) over processing time, so External Ref reflects when
         # the listing was actually sent/dated, not when someone happened to
@@ -275,7 +328,7 @@ def process_files(paths):
     return results
 
 
-def _geocode_records(records, filename, provider_name):
+def _geocode_records(records, filename, provider_name, deadline):
     """Fills Lat/Lng in place for each record via extraction.geocode.
     geocode() caches on disk by address string, so repeat buildings (e.g.
     several floors in the same Knotel building) cost one lookup, not one
@@ -307,12 +360,28 @@ def _geocode_records(records, filename, provider_name):
     wrong-vs-right judgment on the value itself — it's never used to
     silently overwrite Property Address 1/Building.
 
-    Returns True if the web-search tier hit Gemini's daily quota limit
-    for at least one record in this file — process_files turns this into
-    a per-file "warning" (not "error"; the records themselves still
-    extracted fine) so a batch that had to fall back further than usual
-    is explained rather than silently degraded.
-    """
+    Returns (quota_exhausted, deadline_hit):
+    - quota_exhausted is True if the web-search tier hit Gemini's daily
+      quota limit for at least one record in this file. Once that
+      happens, every LATER bare-name record in this SAME call skips the
+      web-search attempt entirely (falling straight to the bare-name
+      Nominatim tier) rather than making another Gemini call guaranteed
+      to hit the same daily 429 — confirmed via real Render logs
+      (2026-07) that retrying it anyway for every remaining bare-name
+      building wastes real time (extraction.address_lookup's own rate-
+      limit pacing still waits before each attempt even though it's
+      certain to fail), contributing to the exact timeout risk deadline
+      (below) exists to guard against.
+    - deadline_hit is True if `deadline` (a time.monotonic() value) was
+      reached before every record could be looked up — remaining
+      records are marked "Needs manual lookup" immediately, without
+      attempting a lookup at all, rather than risking gunicorn's own
+      --timeout SIGKILLing the whole request (confirmed this actually
+      happened, 2026-07 — see BATCH_DEADLINE_SECONDS above).
+    Either way, process_files turns this into a per-file "warning" (not
+    "error"; the records themselves still extracted fine) so a batch
+    that had to fall back further than usual is explained rather than
+    silently degraded."""
     # When the SAME building appears more than once in this file with
     # different amounts of qualifying detail (e.g. Crown Estate's "1 Vine
     # Street, W1" for one floor vs a plain "1 Vine Street" for a different
@@ -334,7 +403,21 @@ def _geocode_records(records, filename, provider_name):
             richest_building[base] = building
 
     quota_exhausted = False
+    daily_quota_hit = False
+    deadline_hit = False
     for record in records:
+        if time.monotonic() >= deadline:
+            deadline_hit = True
+            record["Lat"] = "Needs manual lookup"
+            record["Lng"] = "Needs manual lookup"
+            if not record.get("Property Postcode"):
+                record["Property Postcode"] = "Needs manual lookup"
+            _safe_print(
+                f"[geocode] (batch deadline reached) {filename}: skipping remaining lookups — "
+                f"'{(record.get('Property Address 1') or '').strip()}' marked Needs manual lookup"
+            )
+            continue
+
         building = (record.get("Property Address 1") or "").strip()
         has_digit = any(ch.isdigit() for ch in building)
         # Nominatim can't match a building number spelled out in words
@@ -360,9 +443,22 @@ def _geocode_records(records, filename, provider_name):
         if is_bare_name:
             lat = lng = geo_postcode = None
             error = None
-            web_address, web_sources, hit_quota = find_address_via_web_search(building, provider_name)
-            if hit_quota:
-                quota_exhausted = True
+            if daily_quota_hit:
+                # Already confirmed exhausted for today by an earlier
+                # building in this same batch — every later attempt is
+                # certain to hit the identical 429 (Gemini's daily quota
+                # doesn't reset mid-batch), so skip straight to the
+                # bare-name Nominatim fallback below instead of wasting
+                # real time (extraction.address_lookup's own rate-limit
+                # pacing still waits before making a call that's
+                # guaranteed to fail) on a call we already know the
+                # answer to.
+                web_address, web_sources, hit_quota = None, [], False
+            else:
+                web_address, web_sources, hit_quota = find_address_via_web_search(building, provider_name)
+                if hit_quota:
+                    quota_exhausted = True
+                    daily_quota_hit = True
             if web_address:
                 web_query = _geocode_query({"Property Address 1": web_address})
                 lat, lng, geo_postcode, error = geocode(web_query)
@@ -454,7 +550,7 @@ def _geocode_records(records, filename, provider_name):
             target = query or building or "(blank)"
             _safe_print(f"{prefix}{filename}: could not geocode '{target}': {error}")
 
-    return quota_exhausted
+    return quota_exhausted, deadline_hit
 
 
 def _safe_print(message):

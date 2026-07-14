@@ -19,7 +19,7 @@ load_dotenv()
 import storage
 from extraction import address_lookup, geocode as geocode_module, html_images, memlog, pdf_images
 from extraction.naming import make_unique_names
-from extraction.pipeline import process_files
+from extraction.pipeline import BATCH_DEADLINE_SECONDS, process_files
 from spreadsheet import write_xlsx
 
 BASE_DIR = Path(__file__).parent
@@ -185,6 +185,16 @@ def process():
     if not files:
         return jsonify({"error": "No files uploaded"}), 400
 
+    # Computed at the true start of request handling (before file saving,
+    # rule matching, LLM calls — everything that counts against gunicorn's
+    # own --timeout for this WHOLE request, not just geocoding) and passed
+    # straight through to process_files, which threads it into every
+    # file's own _geocode_records call unchanged — one shared budget for
+    # the whole batch, not reset per file. See extraction.pipeline's own
+    # BATCH_DEADLINE_SECONDS for why this exists (confirmed via a real
+    # Render SIGKILL, 2026-07).
+    batch_deadline = time.monotonic() + BATCH_DEADLINE_SECONDS
+
     memlog.log("request start")
     _cleanup_old_batches()
     batch_id = uuid.uuid4().hex
@@ -205,7 +215,7 @@ def process():
             f.save(dest)
             saved_paths.append(dest)
 
-        processed_results = process_files(saved_paths)
+        processed_results = process_files(saved_paths, deadline=batch_deadline)
         # process_files() returns exactly one result per input path, in the
         # same order — pair each back up with its saved original so the
         # "ok" ones below can copy it into the persistent batch dir (the
