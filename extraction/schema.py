@@ -16,6 +16,7 @@ SOURCE_FIELDS = [
     "Marketing Price (Based on Min Term) PCM",
     "Marketing Price (Based on Min Term) PSF",
     "Link to File",
+    "Brochure PDF",
     "Min. Term",
     "Special Features",
     "State of Space",

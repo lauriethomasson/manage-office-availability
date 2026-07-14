@@ -18,12 +18,12 @@ NUMBER_COLS = {"Size (sq ft)", "Desks (max)"}
 COORDINATE_COLS = {"Lat", "Lng"}
 # Columns whose value is a URL, shown as a short clickable label instead
 # of the raw link text (e.g. a long UUID-based URL) — same pattern for
-# all three: cell.value becomes the label, cell.hyperlink keeps the real
+# all four: cell.value becomes the label, cell.hyperlink keeps the real
 # URL. Left blank (not the label) when there's genuinely no URL for that
-# row. There is no "Photo Link" column in the current schema — only
-# these three — so nothing to add there.
+# row.
 LINK_LABELS = {
     "Link to File": "Here",
+    "Brochure PDF": "Here",
     "Floor Plan": "Floor Plan",
     "High Res Images": "High Res Images",
 }

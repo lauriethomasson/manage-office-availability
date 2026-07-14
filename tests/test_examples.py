@@ -248,47 +248,145 @@ def check_knotel_records(failures):
     identifier the source itself provides) against the expected Building
     catches it directly, the same way check_gpe_high_res_images above
     catches a photo misattributed to the *next* building instead of a
-    missing one."""
+    missing one.
+
+    Also pins three more real fields, each with its own real-world catch:
+    Contacts (Knotel gives no individual broker name — only a shared team
+    contact in its intro paragraph — must resolve to the real email/phone
+    there, not the recipient's own forwarding signature or the forwarded
+    email's From:/To: header addresses, both of which sit right next to
+    it in the raw text); Special Features (a real per-floor price-drop
+    note in the 13/07 email must land on exactly the two 15 Hatfields
+    rows it names and nowhere else — checked against both fixtures so a
+    regression that leaked it onto an unrelated row, or dropped it
+    entirely, both fail); and Brochure PDF (pins two real, confirmed
+    source-HTML quirks that would otherwise silently drop a genuine
+    brochure link — "View brochure" with inconsistent casing for 33 Soho,
+    and text/href entirely reversed for 23 Great Titchfield Street — plus
+    Rufus House, which has no brochure button in the source at all and
+    must stay blank rather than picking up a neighboring listing's link)."""
     # Pinned by list index — parse() order is deterministic for a fixed,
     # checked-in source file, and several of these buildings share the
     # same Area and Floor/Unit label as each other (e.g. three different
     # City Fringe buildings each have a plain "2nd Floor" listing), so
     # index position is a more reliable identifier here than either field
-    # alone. Only the indices relevant to the reported regression are
+    # alone. Only the indices relevant to a reported regression are
     # pinned, not all 16/15 rows.
+    KNOTEL_CONTACTS = "Knotel Brokers, londonbrokers@knotel.com, 0204 571 4271"
     checks = [
         (
             "Fw_ Knotel Availability _ 30_06_2026.eml",
             16,
             {
-                2: ("The Hallmark Building, 106 Fenchurch St, London EC3M 5JE", "Hallmark 6th Floor", "EC3M 5JE"),
-                4: (
-                    "Classic House, 174-180 Martha's Buildings, Old St, London EC1V 9BP",
-                    "2nd Floor",
-                    "EC1V 9BP",
+                2: dict(
+                    building="The Hallmark Building, 106 Fenchurch St, London EC3M 5JE",
+                    floor="Hallmark 6th Floor",
+                    postcode="EC3M 5JE",
+                    brochure="https://pitch.com/v/hallmark-6th-floor-jdfuuc",
                 ),
-                5: ("Gilray House, 146-150 City Rd, London EC1V 2RL", "3rd Floor", "EC1V 2RL"),
-                6: ("Gilray House, 146-150 City Rd, London EC1V 2RL", "4th Floor", "EC1V 2RL"),
-                7: ("Rufus House, 2-4 Rufus St, London N1 6PE", "2nd Floor", "N1 6PE"),
-                11: ("7 Howick Place, 7 Howick Pl, London SW1P 1BB", "3rd Floor", "SW1P 1BB"),
-                14: ("Market Exchange, 8 Macklin Street, Covent Garden WC2", "2nd - East Wing", ""),
+                4: dict(
+                    building="Classic House, 174-180 Martha's Buildings, Old St, London EC1V 9BP",
+                    floor="2nd Floor",
+                    postcode="EC1V 9BP",
+                    brochure="https://pitch.com/v/classic-house-8ft3xk",
+                ),
+                5: dict(
+                    building="Gilray House, 146-150 City Rd, London EC1V 2RL",
+                    floor="3rd Floor",
+                    postcode="EC1V 2RL",
+                    brochure="https://pitch.com/v/gilray-house-qg4d3k",
+                ),
+                6: dict(
+                    building="Gilray House, 146-150 City Rd, London EC1V 2RL",
+                    floor="4th Floor",
+                    postcode="EC1V 2RL",
+                    brochure="https://pitch.com/v/gilray-house-qg4d3k",
+                ),
+                7: dict(
+                    building="Rufus House, 2-4 Rufus St, London N1 6PE",
+                    floor="2nd Floor",
+                    postcode="N1 6PE",
+                    # No "View Brochure" button for this listing at all in
+                    # the real source — blank is the honest, correct value.
+                    brochure="",
+                ),
+                9: dict(
+                    building="15 Hatfields, Chadwick Court, London SE1 8DJ",
+                    floor="15 Hatfields - 1st Floor",
+                    postcode="SE1 8DJ",
+                    brochure="https://pitch.com/v/15-hatfield-wajq9e",
+                    # No price-drop promo in this older email at all.
+                    special_features="",
+                ),
+                10: dict(
+                    building="15 Hatfields, Chadwick Court, London SE1 8DJ",
+                    floor="15 Hatfields - 3rd Floor",
+                    postcode="SE1 8DJ",
+                    brochure="https://pitch.com/v/15-hatfield-wajq9e",
+                    special_features="",
+                ),
+                11: dict(
+                    building="7 Howick Place, 7 Howick Pl, London SW1P 1BB",
+                    floor="3rd Floor",
+                    postcode="SW1P 1BB",
+                    brochure="https://app.pitch.com/app/presentation/3761848b-50da-445a-9e78-49e665889bfb/6572cd6a-3cbe-414b-8d46-a16f9cf6d02a",
+                ),
+                12: dict(
+                    building="23 Great Titchfield Street, 23 Great Titchfield St London W1W 7JA",
+                    floor="3B",
+                    postcode="W1W 7JA",
+                    # Real source HTML has this one anchor's text/href
+                    # entirely reversed (href literally = "View Brochure",
+                    # visible text = the real URL) — this pins the recovered
+                    # real link, not the swapped placeholder.
+                    brochure="https://pitch.com/v/23-great-titchfield-street-c6ahp2",
+                ),
+                14: dict(
+                    building="Market Exchange, 8 Macklin Street, Covent Garden WC2",
+                    floor="2nd - East Wing",
+                    postcode="",
+                    brochure="https://pitch.com/v/market-exchange-brochure-8quwwk",
+                ),
             },
         ),
         (
             "Fw_ Knotel Availability _ 13_07_2026.eml",
             15,
             {
+                9: dict(
+                    building="15 Hatfields, Chadwick Court, London SE1 8DJ",
+                    floor="15 Hatfields - 1st Floor",
+                    postcode="SE1 8DJ",
+                    brochure="https://pitch.com/v/15-hatfield-wajq9e",
+                    # The real promo note for this exact row/price — must
+                    # match the "1st Floor" price, not the "3rd Floor" one.
+                    special_features="Price drop: now £120 psf",
+                ),
+                10: dict(
+                    building="15 Hatfields, Chadwick Court, London SE1 8DJ",
+                    floor="15 Hatfields - 3rd Floor",
+                    postcode="SE1 8DJ",
+                    brochure="https://pitch.com/v/15-hatfield-wajq9e",
+                    special_features="Price drop: now £115 psf",
+                ),
                 # The exact regression case: two adjacent West End listings
                 # with genuinely different buildings — "33 Soho" must not
-                # leak onto the "Market Exchange" row that follows it.
-                13: ("33 soho square, W1D 3QU", "2nd Floor", "W1D 3QU"),
-                14: (
-                    "Market Exchange, 8 Macklin Street, Covent Garden WC2",
-                    "2nd - East Wing",
+                # leak onto the "Market Exchange" row that follows it. Also
+                # covers the "View brochure" (lowercase b) casing quirk.
+                13: dict(
+                    building="33 soho square, W1D 3QU",
+                    floor="2nd Floor",
+                    postcode="W1D 3QU",
+                    brochure="https://pitch.com/v/33-soho-square-w1d-7i96p7",
+                ),
+                14: dict(
+                    building="Market Exchange, 8 Macklin Street, Covent Garden WC2",
+                    floor="2nd - East Wing",
                     # This building's own address only ever gives a partial,
                     # outward-only postcode ("WC2", no inward part) — "" is
                     # the honest, correct extraction here, not a bug.
-                    "",
+                    postcode="",
+                    brochure="https://pitch.com/v/market-exchange-brochure-8quwwk",
                 ),
             },
         ),
@@ -310,25 +408,55 @@ def check_knotel_records(failures):
 
         normalized = [normalize_record(r) for r in records]
         local_failures = []
-        for idx, (expected_building, expected_floor, expected_postcode) in expected_by_index.items():
+        for idx, expected in expected_by_index.items():
             if idx >= len(normalized):
                 local_failures.append(f"{filename}: expected a record at index {idx}, only {len(normalized)} present")
                 continue
             row = normalized[idx]
+            expected_floor = expected["floor"]
             if row["Floor/Unit"] != expected_floor:
                 local_failures.append(
                     f"{filename}: record {idx} expected Floor/Unit {expected_floor!r}, got {row['Floor/Unit']!r} "
                     "(fixture may have changed, or record ordering shifted)"
                 )
-            if row["Building"] != expected_building:
+            if row["Building"] != expected["building"]:
                 local_failures.append(
-                    f"{filename}: record {idx} ({expected_floor}) expected Building {expected_building!r}, got {row['Building']!r}"
+                    f"{filename}: record {idx} ({expected_floor}) expected Building {expected['building']!r}, got {row['Building']!r}"
                 )
-            if row["Property Postcode"] != expected_postcode:
+            if row["Property Postcode"] != expected["postcode"]:
                 local_failures.append(
-                    f"{filename}: record {idx} ({expected_floor}) expected Property Postcode {expected_postcode!r}, "
+                    f"{filename}: record {idx} ({expected_floor}) expected Property Postcode {expected['postcode']!r}, "
                     f"got {row['Property Postcode']!r}"
                 )
+            if row["Brochure PDF"] != expected["brochure"]:
+                local_failures.append(
+                    f"{filename}: record {idx} ({expected_floor}) expected Brochure PDF {expected['brochure']!r}, "
+                    f"got {row['Brochure PDF']!r}"
+                )
+            expected_special_features = expected.get("special_features")
+            if expected_special_features is not None and row["Special Features"] != expected_special_features:
+                local_failures.append(
+                    f"{filename}: record {idx} ({expected_floor}) expected Special Features {expected_special_features!r}, "
+                    f"got {row['Special Features']!r}"
+                )
+
+        # Every row (regardless of index) shares the same whole-email
+        # contact — Knotel gives no individual broker name, just a shared
+        # team email/phone in the intro paragraph.
+        contacts_values = {r["Contacts"] for r in normalized}
+        if contacts_values != {KNOTEL_CONTACTS}:
+            local_failures.append(f"{filename}: expected Contacts == {KNOTEL_CONTACTS!r} for every row, got {contacts_values}")
+
+        # Every OTHER row (not one of the two 15 Hatfields price-drop rows
+        # above) must have blank Special Features — guards against the
+        # promo note leaking onto an unrelated building/floor.
+        unexpected_special_features = {
+            (i, r["Building"], r["Floor/Unit"]): r["Special Features"]
+            for i, r in enumerate(normalized)
+            if r["Special Features"] and expected_by_index.get(i, {}).get("special_features") != r["Special Features"]
+        }
+        if unexpected_special_features:
+            local_failures.append(f"{filename}: unexpected Special Features on rows not covered by the price-drop promo: {unexpected_special_features}")
 
         # Knotel is a lettings-only source — it never sets a Sale Price
         # signal (see extraction.schema.normalize_record), so For Sale

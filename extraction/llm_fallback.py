@@ -35,7 +35,13 @@ ALL_FIELDS = LLM_FIELDS + EXTRA_FIELDS
 # afterwards. Excluded from the prompt entirely rather than just
 # discarded after the fact, so the model doesn't waste output tokens
 # guessing at fields it was never going to be trusted for anyway.
-PROMPT_FIELDS = [f for f in ALL_FIELDS if f not in ("Floor Plan", "High Res Images")]
+#
+# Brochure PDF is excluded for the same reason: it's only ever a real
+# href pulled directly from a source's own HTML (currently just Knotel's
+# "View Brochure" link — see extraction.rules.knotel), never text the
+# LLM fallback could plausibly reconstruct a working URL for from raw
+# extracted text alone.
+PROMPT_FIELDS = [f for f in ALL_FIELDS if f not in ("Floor Plan", "High Res Images", "Brochure PDF")]
 
 # gemini-3.5-flash's free tier is capped at just 20 requests/day (Google's
 # newest flash-tier model). gemini-3.1-flash-lite is explicitly positioned
@@ -271,5 +277,6 @@ def _parse_and_validate(raw):
         # source heading into them unprompted.
         record["Floor Plan"] = ""
         record["High Res Images"] = ""
+        record["Brochure PDF"] = ""
         records.append(record)
     return records, source_name

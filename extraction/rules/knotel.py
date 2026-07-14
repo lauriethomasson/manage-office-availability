@@ -20,6 +20,14 @@ Layout (as plain text, one item per line):
 
 A building with multiple floors repeats from "Available" onward without
 repeating the name/address lines.
+
+Contacts is a fixed, whole-email value (_contact_block) — Knotel gives no
+individual broker name, only a shared team contact in the intro
+paragraph. Special Features carries a per-floor price-drop note when the
+intro also flags one (_price_drop_notes) — otherwise blank. Brochure PDF
+comes from each listing's own "View Brochure" link/button (_group_items)
+— distinct from Link to File, which app.py always overwrites with the
+persisted source file link regardless of what this rule sets.
 """
 import re
 
@@ -28,6 +36,15 @@ from extraction.text_utils import titlecase_area
 AREA_RE = re.compile(r"^[A-Z][A-Z ]+$")
 POSTCODE_HINT_RE = re.compile(r"[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}", re.IGNORECASE)
 LINK_LABELS = ("View property", "Download Floorplan", "View Brochure", "View Listing", "View Floorplan")
+_LINK_LABELS_LOWER = {label.lower() for label in LINK_LABELS}
+
+FROM_LINE_RE = re.compile(r"^(.+?)\s*<[^>]+>$")
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+PHONE_RE = re.compile(r"\b0\d{3,4}[\s-]?\d{3}[\s-]?\d{3,4}\b")
+GET_IN_TOUCH_RE = re.compile(r"get in touch", re.IGNORECASE)
+
+PRICE_DROP_HEADER_RE = re.compile(r"^\*\*\s*PRICE DROP AT (.+?)\s*\*\*$")
+PRICE_DROP_LINE_RE = re.compile(r"^(.+?)\s*[–-]\s*now\s+(£[\d,.]+\s*(?:psf|pcm))\s*$", re.IGNORECASE)
 
 
 def detect(content):
@@ -58,9 +75,106 @@ def _combine_name_and_address(name, address):
     return address
 
 
+def _contact_block(lines):
+    """Knotel's own emails give no individual broker name for any listing
+    at all — just a shared team contact mentioned in the intro
+    paragraph, e.g. "feel free to get in touch via londonbrokers@
+    knotel.com or on 0204 571 4271" — the same "company/team, not a
+    named person, acting as the contact" pattern already handled for
+    GPE/Crown Estate's sole-agent case (extraction.llm_fallback's own
+    prompt rules).
+
+    Anchored specifically on the line containing "get in touch" (rather
+    than scanning the whole intro block) so this can't instead pick up
+    the recipient's own forwarding signature at the very top of every
+    forwarded copy (a different phone number, "0203 369 9800", sits
+    there) or the forwarded email's own "From:"/"To:" header addresses
+    (mail@brokers.knotel.com / lthomasson@spacepoint.co.uk) — neither of
+    those is the contact this app should show.
+
+    The sender's own display name (e.g. "Knotel Brokers") comes from the
+    forwarded email's own "From:" header line — confirmed present, in
+    the exact same "From:" / "Name <email>" shape, in both example
+    emails; real text Outlook itself wrote when this was forwarded, not
+    fabricated."""
+    sender_name = ""
+    try:
+        idx = lines.index("From:")
+        m = FROM_LINE_RE.match(lines[idx + 1])
+        if m:
+            sender_name = m.group(1).strip()
+    except (ValueError, IndexError):
+        pass
+
+    touch_line = next((l for l in lines if GET_IN_TOUCH_RE.search(l)), "")
+    email_match = EMAIL_RE.search(touch_line)
+    phone_match = PHONE_RE.search(touch_line)
+
+    parts = [p for p in (sender_name, email_match and email_match.group(), phone_match and phone_match.group()) if p]
+    return ", ".join(parts)
+
+
+def _price_drop_notes(lines):
+    """Knotel's intro sometimes flags a recent price reduction for
+    specific floors of one building, e.g.:
+        ** PRICE DROP AT 15 HATFIELDS **
+        We've reduced the pricing at 15 Hatfields:
+        1st Floor – now £120 psf
+        3rd Floor – now £115 psf
+    Genuinely relevant context for those exact rows (confirmed the
+    price already shown in each floor's own "Price (per sqft)" matches
+    the promo note exactly, in the one real example seen so far) — not
+    a sale signal (this rule never sets Sale Price at all, and Knotel is
+    lettings-only; a price-drop mention isn't evidence of a sale, same
+    "promotional pricing != for sale" distinction already confirmed for
+    GPE).
+
+    Returns {building_name_lower: {floor_label: note}}. Building-
+    agnostic — keyed off whatever name follows "PRICE DROP AT", not a
+    hardcoded "15 Hatfields" — so a future email promoting a different
+    building's floors is picked up the same way. Scans a bounded window
+    after the header (skipping the intervening "We've reduced..." lead-
+    in sentence) and stops early at the next area header, since that
+    means the actual listings have started."""
+    notes = {}
+    i = 0
+    n = len(lines)
+    while i < n:
+        m = PRICE_DROP_HEADER_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        building_name = m.group(1).strip()
+        floor_notes = {}
+        j = i + 1
+        window_limit = min(n, i + 12)
+        while j < window_limit:
+            if AREA_RE.match(lines[j]) and len(lines[j].split()) <= 3:
+                break
+            line_m = PRICE_DROP_LINE_RE.match(lines[j])
+            if line_m:
+                floor_label, price = line_m.group(1).strip(), line_m.group(2).strip()
+                floor_notes[floor_label] = f"Price drop: now {price}"
+            j += 1
+        if floor_notes:
+            notes[building_name.lower()] = floor_notes
+        i = j
+    return notes
+
+
+def _price_drop_note_for(price_drop_notes, building, floor):
+    building_key = next((k for k in price_drop_notes if k in building.lower()), None)
+    if not building_key:
+        return ""
+    floor_label = next((label for label in price_drop_notes[building_key] if label.lower() in floor.lower()), None)
+    return price_drop_notes[building_key][floor_label] if floor_label else ""
+
+
 def parse(content):
     lines = [l.strip() for l in content["text"].split("\n") if l.strip()]
     link_groups = _group_items(content.get("html_items", []))
+    contact = _contact_block(lines)
+    price_drop_notes = _price_drop_notes(lines)
 
     records = []
     current_area = ""
@@ -135,7 +249,9 @@ def parse(content):
                     "Desks (max)": seats,
                     "Marketing Price (Based on Min Term) PCM": _strip_units(price_monthly, "pcm"),
                     "Marketing Price (Based on Min Term) PSF": _strip_units(price_psf, "per sqft"),
-                    "Link to File": group.get("brochure", ""),
+                    "Special Features": _price_drop_note_for(price_drop_notes, current_building, floor),
+                    "Contacts": contact,
+                    "Brochure PDF": group.get("brochure", ""),
                     "Floor Plan": group.get("floorplan", ""),
                     "High Res Images": group.get("highres", ""),
                 }
@@ -194,9 +310,24 @@ def _group_items(items):
             continue
 
         text, href = a, b
-        if text not in LINK_LABELS:
+        # Confirmed (2026-07, a real Knotel email) two distinct source-HTML
+        # quirks that would otherwise silently drop a real, genuine
+        # brochure link:
+        #  - inconsistent button casing ("View brochure" instead of "View
+        #    Brochure") for one listing (33 Soho) — matched case-
+        #    insensitively below instead of via exact membership in
+        #    LINK_LABELS.
+        #  - text and href reversed entirely for another listing (23 Great
+        #    Titchfield Street): href held the literal label text ("View
+        #    Brochure") while the tag's own visible text held the real
+        #    destination URL. Swapped back before the rest of this
+        #    function's label-based logic runs, so it's treated exactly
+        #    like every normal, correctly-formed button.
+        if href.lower() in _LINK_LABELS_LOWER and text.lower().startswith(("http://", "https://")):
+            text, href = href, text
+        if text.lower() not in _LINK_LABELS_LOWER:
             continue
-        if text == "View property":
+        if text.lower() == "view property":
             current = {}
             groups.append(current)
             if pending_image:
