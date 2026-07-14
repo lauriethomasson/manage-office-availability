@@ -15,7 +15,7 @@ from .address_lookup import find_address as find_address_via_web_search
 from .file_readers import read_file
 from .geocode import geocode
 from .llm_fallback import LLMExtractionError, extract_with_llm
-from .naming import extract_date, resolve_provider_name, resolve_source_date
+from .naming import area_from_records, extract_area_hint, resolve_provider_name, resolve_source_date
 from .rules import try_rules
 from .schema import normalize_record, street_address_only
 
@@ -162,7 +162,7 @@ def process_files(paths, deadline=None):
             "error": None,
             "warning": None,
             "provider_name": None,
-            "date": None,
+            "display_name": None,
             "email_html": None,
             "pages_text": None,
             "html_items": None,
@@ -323,10 +323,29 @@ def process_files(paths, deadline=None):
         for record in normalized:
             record["External Ref"] = external_ref
 
+        # The output spreadsheet's own display name — same provider_name,
+        # same ref_date as External Ref above (one consistent date across
+        # both, rather than maintaining two separate resolutions), plus an
+        # area/subset disambiguator when one's available. Confirmed real
+        # (2026-07): UNION exports the same provider+date combination as
+        # several separate area-based files (City, Aldgate & Whitechapel,
+        # Shoreditch, ...) in one sitting, so provider+date alone produced
+        # indistinguishable filenames for genuinely different files.
+        # extract_area_hint (the ORIGINAL uploaded filename's own trailing
+        # " - <area>" segment, when present) is tried first — it's the
+        # most specific, human-authored signal; area_from_records (every
+        # extracted row sharing one Area value) is a weaker fallback for
+        # when the filename itself gives no hint. Neither found is a
+        # normal, expected case (most sources' filenames/Area values never
+        # carry this kind of split), not a failure — the name is just
+        # provider_name plus the date, exactly as before this existed.
+        area_hint = extract_area_hint(filename, provider_name) or area_from_records(normalized)
+        display_name = f"{provider_name} - {area_hint}" if area_hint else provider_name
+        result["display_name"] = f"{display_name}_{ref_date}"
+
         result["records"] = normalized
         result["record_count"] = len(normalized)
         result["provider_name"] = provider_name
-        result["date"] = extract_date(content)
         results.append(result)
 
     # Mirroring both on-disk lookup caches to durable storage (once per

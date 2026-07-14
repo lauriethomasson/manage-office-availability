@@ -248,7 +248,7 @@ def process():
         ok_results = [r for r in results if r["status"] == "ok"]
         if ok_results:
             batch_dir.mkdir(parents=True)
-        unique_names = make_unique_names([(r["provider_name"], r["date"]) for r in ok_results])
+        unique_names = make_unique_names([r["display_name"] for r in ok_results])
         for r, name in zip(ok_results, unique_names):
             r["output_file"] = f"{name}.xlsx"
 

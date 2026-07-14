@@ -20,6 +20,7 @@ from extraction import html_images
 from extraction.llm_fallback import _build_prompt
 from extraction import pdf_images
 from extraction import xlsx_links
+from extraction import naming as naming_module
 from extraction import pipeline as pipeline_module
 import app as app_module
 import time
@@ -766,6 +767,82 @@ def check_xlsx_links_for_llm_fallback(failures):
 
     if not local_failures:
         print("OK  xlsx_links: 2 same-building rows each get their OWN link, a floor-plan link classified separately, a real double-space mismatch resolved, a linkless row left blank")
+    failures.extend(local_failures)
+
+
+def check_area_disambiguated_output_names(failures):
+    """Targeted regression test for extraction.naming's area/subset
+    disambiguation, added on request: UNION exports the same provider
+    name and date as several separate area-based files in one sitting
+    (City, City 2, Aldgate & Whitechapel, Shoreditch, ...), so provider
+    + date alone produced indistinguishable output filenames for
+    genuinely different files.
+
+    Covers all three priority tiers together: (1) extract_area_hint from
+    the original filename's own trailing " - <area>" segment — including
+    the real "City 2" case, which must NOT be rejected just for ending
+    in a digit (only an actual date-shaped fragment like "June 26"
+    should be); (2) area_from_records, when the filename gives no hint
+    but every extracted row shares one Area value; (3) make_unique_names'
+    numeric "(2)"/"(3)" fallback, now only reached when provider+area+
+    date are ALL still identical.
+
+    Verified live against 3 real UNION files with different area names
+    (City 2, Aldgate & Whitechapel, Shoreditch) through the real running
+    pipeline — this is the offline pure-function counterpart, covering
+    the tiers that real run didn't happen to exercise (Area-field
+    consensus, numeric fallback)."""
+    local_failures = []
+
+    filename_cases = [
+        ("UNION - Availability - June 26 - City.xlsx", "UNION", "City"),
+        ("UNION - Availability - June 26 - City 2.xlsx", "UNION", "City 2"),
+        ("UNION  - Availability - June 26 - Aldgate & Whitechapel.xlsx", "UNION", "Aldgate & Whitechapel"),
+        ("UNION - Availability - June 26 - Shoreditch.xlsx", "UNION", "Shoreditch"),
+        # No " - "-separated area segment at all — must return None, not
+        # mistake the whole cleaned-up name for an "area".
+        ("Fw_ MetSpace Availability Update.eml", "MetSpace", None),
+        # Only generic/date/provider segments present — must return None.
+        ("UNION - Availability - June 26.xlsx", "UNION", None),
+    ]
+    for filename, provider_name, expected in filename_cases:
+        result = naming_module.extract_area_hint(filename, provider_name)
+        if result != expected:
+            local_failures.append(f"extract_area_hint({filename!r}, {provider_name!r}) expected {expected!r}, got {result!r}")
+
+    area_records_cases = [
+        ([{"Area": "Shoreditch"}, {"Area": "Shoreditch"}, {"Area": "Shoreditch"}], "Shoreditch"),
+        ([{"Area": "City"}, {"Area": "Shoreditch"}], None),
+        ([{"Area": ""}, {"Area": ""}], None),
+        # A record with no Area value at all doesn't break consensus — it
+        # carries no information either way, unlike a genuinely different
+        # non-empty value (the mixed-areas case above).
+        ([{"Area": "City"}, {}], "City"),
+    ]
+    for records, expected in area_records_cases:
+        result = naming_module.area_from_records(records)
+        if result != expected:
+            local_failures.append(f"area_from_records({records!r}) expected {expected!r}, got {result!r}")
+
+    unique_names_cases = [
+        (["UNION - City_2026-07-14", "UNION - Shoreditch_2026-07-14"], ["UNION - City_2026-07-14", "UNION - Shoreditch_2026-07-14"]),
+        (["MetSpace_2026-07-14", "MetSpace_2026-07-14"], ["MetSpace_2026-07-14", "MetSpace_2026-07-14 (2)"]),
+        (
+            ["MetSpace_2026-07-14", "MetSpace_2026-07-14", "MetSpace_2026-07-14"],
+            ["MetSpace_2026-07-14", "MetSpace_2026-07-14 (2)", "MetSpace_2026-07-14 (3)"],
+        ),
+    ]
+    for names, expected in unique_names_cases:
+        result = naming_module.make_unique_names(names)
+        if result != expected:
+            local_failures.append(f"make_unique_names({names!r}) expected {expected!r}, got {result!r}")
+
+    if not local_failures:
+        print(
+            f"OK  area-disambiguated naming: {len(filename_cases)} filename cases (incl. the real 'City 2' "
+            f"digit-suffix case), {len(area_records_cases)} Area-consensus cases, {len(unique_names_cases)} "
+            "collision-fallback cases"
+        )
     failures.extend(local_failures)
 
 
@@ -1668,6 +1745,7 @@ def main():
     check_names_only(failures)
     check_geocode_same_building_ambiguity(failures)
     check_source_filename_disambiguation(failures)
+    check_area_disambiguated_output_names(failures)
     check_html_images_for_llm_fallback(failures)
     check_xlsx_links_for_llm_fallback(failures)
     check_llm_prompt_handles_ranges_and_price_tiers(failures)
