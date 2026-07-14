@@ -17,6 +17,7 @@ from extraction.rules import try_rules
 from extraction.schema import normalize_record, street_address_only, names_only
 from extraction import geocode as geocode_module
 from extraction import html_images
+from extraction.llm_fallback import _build_prompt
 from extraction import pdf_images
 import app as app_module
 
@@ -776,6 +777,42 @@ def check_html_images_for_llm_fallback(failures):
     failures.extend(local_failures)
 
 
+def check_llm_prompt_handles_ranges_and_price_tiers(failures):
+    """Targeted regression test for a real bug (2026-07, The Workplace
+    Company — a brand-new provider's real email): the LLM fallback turned
+    ONE flexible listing described with a size range ("ranges from 1,593
+    sq ft to 2,729 sq ft") and two pricing tiers ("traditional lease from
+    £13,907 pcm" vs "fully managed from £17,400 pcm") into a fabricated
+    2-row (then, on a later real call, a full 2x2 = 4-row) cross-product
+    of every size/price combination, while also silently dropping the
+    £17,400 tier from every row.
+
+    A live Gemini call is non-deterministic and would make this specific
+    check flaky/costly in an automated suite (unlike every other check
+    here, which is fast and offline) — this instead pins that the fixed
+    prompt's own text actually contains the size-range/multi-tier-price
+    instructions, so a future edit can't silently remove them. The real
+    behavioral fix was verified live against the actual source email
+    (twice, for consistency) and through the real running Flask endpoint
+    end-to-end: both confirmed exactly 1 row, Size using the range's
+    upper bound (2729), PCM using the first-quoted tier (13907), and the
+    second tier's price preserved in Special Features rather than
+    dropped."""
+    prompt = _build_prompt("(sample document text)", "test")
+    local_failures = []
+    if "size range" not in prompt.lower() and "size_range" not in prompt.lower():
+        local_failures.append("expected the LLM prompt to explicitly mention size ranges (e.g. 'SIZE RANGE') as a single-listing case")
+    if "upper" not in prompt.lower() and "larger" not in prompt.lower():
+        local_failures.append("expected the LLM prompt to specify using the upper/larger bound of a size range")
+    if "pricing tier" not in prompt.lower() and "pricing option" not in prompt.lower():
+        local_failures.append("expected the LLM prompt to explicitly mention multiple pricing tiers/options as a single-listing case")
+    if "special features" not in prompt.lower():
+        local_failures.append("expected the LLM prompt to instruct that an extra pricing tier goes into Special Features, not dropped")
+    if not local_failures:
+        print("OK  llm_fallback prompt: size-range/multi-tier-price instructions present")
+    failures.extend(local_failures)
+
+
 def check_contacts_include_phone_email(failures):
     """Targeted regression test for a class of gap a 2026-07 audit found
     across MetSpace, GPE, and Breezblok, prompted by Knotel's own earlier
@@ -1164,6 +1201,7 @@ def main():
     check_names_only(failures)
     check_geocode_same_building_ambiguity(failures)
     check_html_images_for_llm_fallback(failures)
+    check_llm_prompt_handles_ranges_and_price_tiers(failures)
     check_contacts_include_phone_email(failures)
     check_bc_records(failures)
     check_breezblok_records(failures)
