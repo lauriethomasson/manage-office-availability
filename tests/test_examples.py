@@ -23,7 +23,16 @@ EXPECTATIONS = [
     ("Fw_ Knotel Availability _ 13_07_2026.eml", "Knotel", 15),
     ("Fw_ MetSpace Availability Update.eml", "MetSpace", 14),
     ("Fw_ The latest GPE Fully Managed availability – workspaces you won't want to miss..eml", "GPE", 15),
-    ("Kitt's Availability (External) - Live Availability.pdf", "Grid/Tabular", 19),
+    # 57, not 19 — a real, previously-shipped regression (2026-07 audit):
+    # extraction.rules.grid only ever looked at the FIRST table matching
+    # its header keywords, so a long table split across multiple
+    # page-tables by pdfplumber (confirmed: this exact PDF has 3, each
+    # repeating the same header row) silently dropped every row on every
+    # table after the first — 38 of 57 real listings, across 2 entirely-
+    # ignored tables. An exact count (not just ">= 19", which the old,
+    # already-broken 19 would have kept passing) is what actually catches
+    # this class of bug — see main()'s own exact-match check below.
+    ("Kitt's Availability (External) - Live Availability.pdf", "Grid/Tabular", 57),
     ("BC Current Availability.pdf", "BC", 11),
     ("John Stow House.pdf", "Breezblok", 1),
 ]
@@ -577,6 +586,63 @@ def check_names_only(failures):
     failures.extend(local_failures)
 
 
+def check_contacts_include_phone_email(failures):
+    """Targeted regression test for a class of gap a 2026-07 audit found
+    across MetSpace, GPE, and Breezblok, prompted by Knotel's own earlier
+    "Contacts was entirely blank" bug: each of these sources' contact
+    block DOES have a real phone and/or email for every named contact,
+    genuinely present in the source, that was being silently dropped —
+    only the name(s) ever made it into Contacts. Pins the exact,
+    real Contacts value (name + phone/email) for each, and confirms
+    Assigned Agents (extraction.schema.names_only) still correctly
+    reduces it back to just the name(s) — including GPE's own
+    international "+44 (0) ..." phone format, which an earlier version of
+    names_only's own phone-detection regex (UK-domestic-only) failed to
+    recognize, silently leaking the phone number into Assigned Agents
+    instead of stripping it."""
+    cases = [
+        (
+            "Fw_ MetSpace Availability Update.eml",
+            "MetSpace",
+            "Kieran Christie, sales@metspace.co.uk, 07837 270 455, Sophie Haugh, sales@metspace.co.uk, "
+            "07950 565 491, Nicki Mayle, sales@metspace.co.uk, 07946 136 004",
+            "Kieran Christie, Sophie Haugh, Nicki Mayle",
+        ),
+        (
+            "Fw_ The latest GPE Fully Managed availability – workspaces you won't want to miss..eml",
+            "GPE",
+            "David Korman, +44 (0) 7435 939 956, Molly Maguire, +44 (0) 7887 841 816, Anna Tweed, "
+            "+44 (0) 7990 633 486, Richard Carson, +44 (0) 7436 030 120",
+            "David Korman, Molly Maguire, Anna Tweed, Richard Carson",
+        ),
+        (
+            "John Stow House.pdf",
+            "Breezblok",
+            "Sales, Sales@breezblok.london, +44 7500665267",
+            "Sales",
+        ),
+    ]
+    for filename, expected_rule, expected_contacts, expected_agents in cases:
+        path = ROOT / filename
+        if not path.exists():
+            failures.append(f"{filename}: example file not found (expected at {path})")
+            continue
+        content = read_file(path)
+        rule_name, records = try_rules(content)
+        if rule_name != expected_rule or not records:
+            failures.append(f"{filename}: expected rule '{expected_rule}' with records, got '{rule_name}'")
+            continue
+        norm = normalize_record(records[0])
+        local_failures = []
+        if norm["Contacts"] != expected_contacts:
+            local_failures.append(f"{filename}: expected Contacts {expected_contacts!r}, got {norm['Contacts']!r}")
+        if norm["Assigned Agents"] != expected_agents:
+            local_failures.append(f"{filename}: expected Assigned Agents {expected_agents!r}, got {norm['Assigned Agents']!r}")
+        if not local_failures:
+            print(f"OK  {filename}: Contacts/Assigned Agents spot-checked against known-correct source values")
+        failures.extend(local_failures)
+
+
 def check_bc_records(failures):
     """Targeted regression test for extraction.rules.bc, pinning known-correct
     field values from the real "BC Current Availability.pdf" table.
@@ -698,12 +764,16 @@ def check_breezblok_records(failures):
         "Size (sq ft)": 1750,
         "Desks (max)": 32,
         "Marketing Price (Based on Min Term) PCM": 18000,
-        "Contacts": "Sales",
+        # The real email/phone from the two lines following "Contact:
+        # Sales" in the source — found missing in a 2026-07 audit (the
+        # same class of gap as Knotel's own originally-missed contact
+        # info) and fixed to be captured alongside the name.
+        "Contacts": "Sales, Sales@breezblok.london, +44 7500665267",
         # Not an individual's name, but Breezblok's own source names no
         # one else either — see extraction.rules.breezblok._contact's own
-        # docstring for why this is the correct, non-blank value, same as
-        # Contacts. names_only() must leave it unchanged (it isn't an
-        # email/phone number to strip).
+        # docstring for why this is the correct, non-blank value.
+        # names_only() must strip the email/phone above but leave "Sales"
+        # itself unchanged.
         "Assigned Agents": "Sales",
         "Property Postcode": "EC3A 7JB",
     }
@@ -863,7 +933,7 @@ def check_pdf_floorplan_vs_photos(failures, filename, building, name, expect_gal
 
 def main():
     failures = []
-    for filename, expected_rule, min_count in EXPECTATIONS:
+    for filename, expected_rule, expected_count in EXPECTATIONS:
         path = ROOT / filename
         if not path.exists():
             failures.append(f"{filename}: example file not found (expected at {path})")
@@ -876,8 +946,13 @@ def main():
             failures.append(f"{filename}: expected rule '{expected_rule}', got '{rule_name}'")
             continue
 
-        if not records or len(records) < min_count:
-            failures.append(f"{filename}: expected >= {min_count} records, got {len(records) if records else 0}")
+        # Exact, not just a minimum — a "some rows silently dropped"
+        # regression (the exact Kitt's multi-table bug this pins) can
+        # still clear a loose minimum. A source that's supposed to grow
+        # over time should get its own pinned number bumped here rather
+        # than switched back to a loose bound.
+        if not records or len(records) != expected_count:
+            failures.append(f"{filename}: expected exactly {expected_count} records, got {len(records) if records else 0}")
             continue
 
         for r in records:
@@ -893,6 +968,7 @@ def main():
     check_knotel_records(failures)
     check_street_address_only(failures)
     check_names_only(failures)
+    check_contacts_include_phone_email(failures)
     check_bc_records(failures)
     check_breezblok_records(failures)
     check_pdf_floorplan_vs_photos(

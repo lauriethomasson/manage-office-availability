@@ -135,7 +135,13 @@ def _attach_floor_plans(records, html_items):
         if kind == "link":
             text = a
             building = records[idx].get("Building") or ""
-            if building and (text == building or text.startswith(building) or building in text):
+            # Case-insensitive (2026-07 audit — see extraction.rules.knotel's
+            # own "View brochure" vs "View Brochure" casing bug for the
+            # precedent): a real link's own visible text isn't guaranteed to
+            # match this rule's own extracted Building text byte-for-byte in
+            # case, even when it's clearly the same listing.
+            text_l, building_l = text.lower(), building.lower()
+            if building and (text_l == building_l or text_l.startswith(building_l) or building_l in text_l):
                 j = i + 1
                 while j < n:
                     kind2, a2, b2 = html_items[j]
@@ -166,6 +172,8 @@ def _max_desks(desc):
 
 
 NAME_RE = re.compile(r"^[A-Z][a-zA-Z'.-]+(?: [A-Z][a-zA-Z'.-]+)+$")
+EMAIL_RE = re.compile(r"^[\w.+-]+@[\w.-]+\.\w+$")
+PHONE_RE = re.compile(r"^0\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,4}$")
 
 
 def _contact_block(lines):
@@ -175,7 +183,16 @@ def _contact_block(lines):
     name-shaped (e.g. "Sales Manager" is two capitalized words), so rather
     than pattern-matching every line for "looks like a name", anchor on the
     one line in each group that's unambiguous — the website — and take the
-    name as whatever sits exactly 4 lines before it."""
+    name as whatever sits exactly 4 lines before it.
+
+    Also pulls the phone (2 lines before the website) and email (1 line
+    before it) into Contacts alongside each name — confirmed (2026-07
+    audit) these were being silently dropped even though the source gives
+    a real, structured phone+email for every contact, the same class of
+    gap Knotel's own missing contact info turned out to be. names_only
+    (extraction.schema) already strips these back out for Assigned
+    Agents, same as it does for Knotel's own combined Contacts string, so
+    this doesn't need any special-casing there."""
     try:
         idx = lines.index("Contact")
     except ValueError:
@@ -183,10 +200,16 @@ def _contact_block(lines):
     end = next((i for i in range(idx + 1, len(lines)) if lines[i].lower().startswith("copyright")), len(lines))
     block = lines[idx + 1 : end]
 
-    names = []
+    parts = []
+    seen_names = set()
     for i, line in enumerate(block):
         if line.lower().startswith("www.") and i >= 4:
-            candidate = block[i - 4]
-            if NAME_RE.match(candidate) and candidate not in names:
-                names.append(candidate)
-    return ", ".join(names)
+            name, phone, email = block[i - 4], block[i - 2], block[i - 1]
+            if NAME_RE.match(name) and name not in seen_names:
+                seen_names.add(name)
+                parts.append(name)
+                if EMAIL_RE.match(email):
+                    parts.append(email)
+                if PHONE_RE.match(phone):
+                    parts.append(phone)
+    return ", ".join(parts)

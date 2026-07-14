@@ -161,6 +161,15 @@ def _photo_by_building(content, building_names):
     html_items = content.get("html_items", [])
     photo_by_building = {}
 
+    # Case-insensitive lookup (2026-07 audit — see extraction.rules.knotel's
+    # own "View brochure" vs "View Brochure" casing bug for the precedent):
+    # a link's own visible text isn't guaranteed to match this rule's
+    # extracted Building text byte-for-byte in case, even for the same
+    # listing. Resolves back to the CANONICAL Building spelling (the key
+    # parse()'s own final photo_by_building.get(record.get("Building"))
+    # lookup expects), not whatever case the link text happened to use.
+    building_by_lower = {b.lower(): b for b in building_names}
+
     # --- listing-card section: established link -> image adjacency ---
     pending_building = None
     for kind, a, b in html_items:
@@ -168,8 +177,9 @@ def _photo_by_building(content, building_names):
             pending_building = a
             continue
         if pending_building and "digitalassets/images" in b:
-            if pending_building in building_names and pending_building not in photo_by_building:
-                photo_by_building[pending_building] = [b]
+            canonical = building_by_lower.get(pending_building.lower())
+            if canonical and canonical not in photo_by_building:
+                photo_by_building[canonical] = [b]
             pending_building = None
 
     # --- promotional section: bounded text-proximity scan ---
@@ -182,7 +192,7 @@ def _photo_by_building(content, building_names):
                 sequence.append(("image", src))
         elif isinstance(node, Tag) and node.name == "a":
             text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
-            if text in building_names:
+            if text.lower() in building_by_lower:
                 sequence.append(("boundary", text))
                 break  # the "CURRENT AVAILABILITY" section starts here
         elif isinstance(node, NavigableString):
@@ -237,23 +247,57 @@ def _max_desks(desc):
     return m2.group() if m2 else ""
 
 
+_PHONE_RE = re.compile(r"\+?\d[\d\s()]{7,}\d")
+
+
 def _contact_block(lines):
     """GPE emails end with a fixed, whole-email "Get in touch" block, not
     per-listing info — same idea as MetSpace's own contact block. Shaped
     as repeating Name / phone-number-line(s) groups (a phone number is
     sometimes hard-wrapped across two lines, e.g. "+44 (0) 7435 9" then
     "39 956" — a source formatting quirk), terminated by "View in
-    browser". Rather than parse the phone number's own shape (fragile
-    given that wrapping), just keep whichever lines look like a person's
-    name and skip everything else in the block."""
+    browser".
+
+    Pulls the phone number into Contacts alongside each name — confirmed
+    (2026-07 audit) this was being silently dropped even though the
+    source gives a real phone for every contact, the same class of gap
+    Knotel's own missing contact info turned out to be. Collects every
+    line between one name and the next (rather than assuming exactly one
+    phone line) and joins them with NO separator before extracting the
+    phone number, so a wrapped number like "+44 (0) 7435 9" / "39 956"
+    reassembles into a normal-looking "+44 (0) 7435 939 956" — confirmed
+    against the one real wrapped example seen so far, but this join
+    convention (no separator) is an assumption, not verified against a
+    second wrapped case; double check if a future contact's phone number
+    ever looks wrong. names_only (extraction.schema) already strips
+    phone numbers back out for Assigned Agents, same as it does for
+    Knotel's own combined Contacts string, so this doesn't need any
+    special-casing there. No email address appears anywhere in this
+    block in the real source — nothing to add for that."""
     try:
         idx = lines.index("Get in touch")
     except ValueError:
         return ""
     end = next((i for i in range(idx + 1, len(lines)) if lines[i] == "View in browser"), len(lines))
-    names = [l for l in lines[idx + 1 : end] if NAME_RE.match(l)]
-    seen = []
-    for n in names:
-        if n not in seen:
-            seen.append(n)
-    return ", ".join(seen)
+    block = lines[idx + 1 : end]
+
+    parts = []
+    seen_names = set()
+    i, n = 0, len(block)
+    while i < n:
+        line = block[i]
+        if NAME_RE.match(line) and line not in seen_names:
+            seen_names.add(line)
+            parts.append(line)
+            j = i + 1
+            fragments = []
+            while j < n and not NAME_RE.match(block[j]):
+                fragments.append(block[j])
+                j += 1
+            phone_match = _PHONE_RE.search("".join(fragments))
+            if phone_match:
+                parts.append(phone_match.group().strip())
+            i = j
+        else:
+            i += 1
+    return ", ".join(parts)

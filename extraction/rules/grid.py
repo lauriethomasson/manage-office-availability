@@ -32,48 +32,61 @@ MIN_MATCHES = 4
 
 
 def detect(content):
-    return _find_table(content) is not None
+    return bool(_find_tables(content))
 
 
 def parse(content):
-    table = _find_table(content)
-    if not table:
+    tables = _find_tables(content)
+    if not tables:
         return []
-    header, rows = table[0], table[1:]
-    col_map = _map_columns(header)
-
-    # "Contacts": Kitt's-style sheets have one merged header ("...team
-    # assigned to this space") over several name columns with no
-    # sub-header text of their own — claim whichever unmapped columns sit
-    # to the right of "Broker Fee" (or, failing that, whatever's left
-    # unmapped) as contact columns, however many there are.
-    contact_cols = _guess_contact_columns(header, col_map)
 
     records = []
-    for row in rows:
-        if not any(c.strip() for c in row):
-            continue
-        record = {}
-        for idx, col_name in col_map.items():
-            if idx < len(row):
-                record[col_name] = row[idx]
-        if contact_cols:
-            names = [row[i].strip() for i in contact_cols if i < len(row) and row[i] and row[i].strip()]
-            if names:
-                record["Contacts"] = ", ".join(names)
-        if record.get("Building") or record.get("Area"):
-            records.append(record)
+    for header, rows in tables:
+        col_map = _map_columns(header)
+
+        # "Contacts": Kitt's-style sheets have one merged header ("...team
+        # assigned to this space") over several name columns with no
+        # sub-header text of their own — claim whichever unmapped columns
+        # sit to the right of "Broker Fee" (or, failing that, whatever's
+        # left unmapped) as contact columns, however many there are.
+        contact_cols = _guess_contact_columns(header, col_map)
+
+        for row in rows:
+            if not any((c or "").strip() for c in row):
+                continue
+            record = {}
+            for idx, col_name in col_map.items():
+                if idx < len(row):
+                    record[col_name] = row[idx]
+            if contact_cols:
+                names = [row[i].strip() for i in contact_cols if i < len(row) and row[i] and row[i].strip()]
+                if names:
+                    record["Contacts"] = ", ".join(names)
+            if record.get("Building") or record.get("Area"):
+                records.append(record)
     return records
 
 
-def _find_table(content):
+def _find_tables(content):
+    """Every table in the source whose header row resembles our target
+    schema — not just the first. Confirmed empirically (2026-07, a real
+    audit of Kitt's own PDF against its actual spreadsheet output) that a
+    long table gets split across multiple page-tables by pdfplumber, each
+    one repeating the exact same header row — returning only the first
+    (the previous behavior) silently dropped every listing on every table
+    after it: 38 of 57 real rows, across 2 entirely-ignored tables, in
+    the real Kitt's fixture this rule was built for. Each table's header
+    is re-mapped independently (not assumed identical to the first) in
+    case a future source's page-split tables ever have a genuinely
+    different column order."""
+    tables = []
     for table in content.get("tables", []):
         if len(table) < 2:
             continue
         header = table[0]
         if len(_map_columns(header)) >= MIN_MATCHES:
-            return table
-    return None
+            tables.append((header, table[1:]))
+    return tables
 
 
 def _map_columns(header):

@@ -424,6 +424,59 @@ it in `extraction/rules/__init__.py`. Doing so also means its output
 spreadsheet gets a proper provider-name (e.g. `Foo.xlsx`) instead of
 falling back to a filename guess.
 
+### Checklist: 5 failure patterns to check for every new/modified parser
+
+A 2026-07 audit of Knotel's own real bugs found the same 5 failure
+patterns recurring across MetSpace, GPE, Kitt's, BC, and Breezblok too
+(see each rule's own docstrings/comments for the specific real examples
+found and fixed). Check every one of these — against the ACTUAL source
+text and ACTUAL spreadsheet output for a few real rows, not just by
+reading the code — whenever a parser is added or changed:
+
+1. **Silently discarding real address text.** Does the rule read a
+   building/listing name but drop the very next line/field where the
+   real street address actually lives, falling back to unreliable
+   bare-name geocoding when a real address was available all along?
+   (The original Knotel bug — its own address line was right there,
+   discarded, for every single listing.)
+2. **Missing company-level contacts.** Does the source have a company/
+   team-level contact block (name, email, phone) that isn't being
+   extracted into `Contacts`? A rule can capture the name and still
+   silently drop a real phone/email sitting right next to it (found in
+   MetSpace, GPE, and Breezblok — not just "blank", a subtler partial
+   miss). `Contacts` should hold the fuller info; `extraction.schema.
+   names_only` derives the name-only `Assigned Agents` from it
+   automatically — don't hand-roll a second, separate name-only
+   extraction in the rule itself.
+3. **Silently overwritten/discarded link fields.** Is a real per-listing
+   link (brochure, floor plan, photos) correctly extracted by the rule
+   but then clobbered before reaching the spreadsheet? `app.py`
+   unconditionally overwrites `Link to File` for every record with the
+   persisted source-file link, regardless of what any rule sets there —
+   a rule's own distinct per-listing link needs its own column (see
+   Knotel's `Brochure PDF`), never `Link to File`.
+4. **Case-sensitive or reversed text/link matching.** Does the rule's
+   link-matching assume consistent capitalization (a real source can use
+   inconsistent casing for the same button/label on different listings)
+   or a consistent href/visible-text order (a real source can have them
+   swapped for one specific listing)? Compare case-insensitively; don't
+   assume href and visible text are never swapped.
+5. **Record-boundary detection relying on incomplete signals.** Does
+   "has a new listing/building started" rely on an assumption that can
+   fail for a differently-formatted record within the same source (e.g.
+   gating on a full postcode being present, when a real building's
+   address sometimes only has a partial one)? Prefer a structural
+   invariant the source's own layout guarantees over a heuristic that
+   happens to hold for most rows.
+
+Also worth checking for a table-based rule specifically: does
+`_find_table`-style detection return only the FIRST table whose header
+matches, when a long table can be split across multiple page-tables
+(pdfplumber does this for a table spanning a page break, each split
+repeating the same header row)? `extraction.rules.grid` silently dropped
+38 of 57 real Kitt's listings this way before being fixed to collect
+every matching table, not just the first.
+
 ## Tests
 
 ```

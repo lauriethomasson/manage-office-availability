@@ -30,6 +30,8 @@ _BUILDING_BLOCK_RE = re.compile(
 )
 
 _CONTACT_RE = re.compile(r"^Contact:?\s+(.+)$", re.IGNORECASE | re.MULTILINE)
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+_PHONE_RE = re.compile(r"\+?\d[\d\s]{7,}\d")
 
 # One listing's own details, e.g.:
 #   Proposed space
@@ -79,19 +81,38 @@ def _building(text):
 
 
 def _contact(text):
-    """Returns whatever this brochure's own "Contact: <...>" line says,
-    verbatim (e.g. "Sales") — not just an individual's name. Carries over
-    the same fallback the LLM prompt was given for Crown Estate's sole-
-    agent case: when a source names no individual person but does give a
-    company/team acting as the contact, use that instead of leaving the
-    field blank. Here that isn't a fallback branch at all — this always
-    takes whatever the source's own Contact line says, whether that's a
+    """Returns whatever this brochure's own "Contact: <...>" line says
+    (e.g. "Sales") — not just an individual's name. Carries over the same
+    fallback the LLM prompt was given for Crown Estate's sole-agent case:
+    when a source names no individual person but does give a company/
+    team acting as the contact, use that instead of leaving the field
+    blank. Here that isn't a fallback branch at all — this always takes
+    whatever the source's own Contact line says, whether that's a
     person's name or a team label like "Sales", so the same outcome (a
     real value, not blank, whenever the source has ANY contact signal)
     falls out directly rather than needing a special case. Returns ""
-    only when the source has no "Contact:" line at all."""
+    only when the source has no "Contact:" line at all.
+
+    Also pulls the real email/phone from the two lines immediately
+    following (confirmed real: "Contact: Sales" / "Sales@breezblok.
+    london" / "Telephone: +44 7500665267") — previously silently
+    dropped even though they sit right there in the source, the same
+    class of gap Knotel's own missing contact info turned out to be.
+    names_only (extraction.schema) already strips these back out for
+    Assigned Agents, same as it does for Knotel's own combined Contacts
+    string, so this doesn't need any special-casing there."""
     m = _CONTACT_RE.search(text)
-    return m.group(1).strip() if m else ""
+    if not m:
+        return ""
+    parts = [m.group(1).strip()]
+    for line in text[m.end() :].split("\n", 3)[1:3]:
+        email_match = _EMAIL_RE.search(line)
+        if email_match:
+            parts.append(email_match.group())
+        phone_match = _PHONE_RE.search(line)
+        if phone_match:
+            parts.append(phone_match.group().strip())
+    return ", ".join(parts)
 
 
 def _parse_unit_block(lines):

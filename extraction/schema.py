@@ -139,24 +139,41 @@ def normalize_record(record):
 
 
 _EMAIL_RE = re.compile(r"^[\w.+-]+@[\w.-]+\.\w+$")
-_PHONE_RE = re.compile(r"^0\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,4}$")
+
+
+def _looks_like_phone(s):
+    """True for a comma-part that's a phone number in ANY format — UK
+    domestic (Knotel's "0204 571 4271"), international with country code/
+    parens (GPE's "+44 (0) 7435 939 956"), or anything else shaped like
+    one. Deliberately format-agnostic (no fixed digit-grouping pattern)
+    after a real miss: an earlier version of this check only recognized
+    the UK-domestic shape, so GPE's own international-format numbers
+    weren't stripped and leaked straight into Assigned Agents. A phone
+    number is the only kind of Contacts part that's ALL digits/spaces/
+    punctuation with no letters at all and has a real number of digits in
+    it — a name or company never is, so this can't accidentally strip
+    either of those."""
+    if not s or any(ch.isalpha() for ch in s):
+        return False
+    return sum(ch.isdigit() for ch in s) >= 7
 
 
 def names_only(contacts):
     """Strips any email address or phone number out of a comma-separated
     Contacts value, leaving just the name(s)/company — e.g. Knotel's
     "Knotel Brokers, londonbrokers@knotel.com, 0204 571 4271" becomes
-    "Knotel Brokers". A source whose Contacts is already just names
-    (Kitt's "Leah Noray, Ben Danaher", GPE/MetSpace's own contact
-    blocks, Breezblok's "Sales") passes through unchanged — those rules
-    never put an email/phone into Contacts in the first place, so there's
-    nothing here to strip. General-purpose (not tied to any one rule) so
-    it applies the same way regardless of which source produced Contacts,
-    current or future."""
+    "Knotel Brokers", GPE's "David Korman, +44 (0) 7435 939 956" becomes
+    "David Korman". A source whose Contacts is already just names
+    (Kitt's "Leah Noray, Ben Danaher", Breezblok's "Sales") passes
+    through unchanged — those rules never put an email/phone into
+    Contacts in the first place, so there's nothing here to strip.
+    General-purpose (not tied to any one rule) so it applies the same
+    way regardless of which source produced Contacts, current or
+    future."""
     if not contacts:
         return ""
     parts = [p.strip() for p in contacts.split(",")]
-    names = [p for p in parts if p and not _EMAIL_RE.match(p) and not _PHONE_RE.match(p)]
+    names = [p for p in parts if p and not _EMAIL_RE.match(p) and not _looks_like_phone(p)]
     return ", ".join(names)
 
 

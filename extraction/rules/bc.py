@@ -84,36 +84,49 @@ _REQUIRED_SIGNALS = ["num of desks", "sale price"]
 
 
 def detect(content):
-    return _find_table(content) is not None
+    return bool(_find_tables(content))
 
 
 def parse(content):
-    found = _find_table(content)
-    if not found:
+    found_tables = _find_tables(content)
+    if not found_tables:
         return []
-    header_idx, col_map, table = found
 
     records = []
-    for row in table[header_idx + 1 :]:
-        if not any((c or "").strip() for c in row):
-            continue
-        record = {}
-        for idx, col_name in col_map.items():
-            if idx < len(row):
-                record[col_name] = (row[idx] or "").strip()
-        if record.get("Building"):
-            records.append(record)
+    for header_idx, col_map, table in found_tables:
+        for row in table[header_idx + 1 :]:
+            if not any((c or "").strip() for c in row):
+                continue
+            record = {}
+            for idx, col_name in col_map.items():
+                if idx < len(row):
+                    record[col_name] = (row[idx] or "").strip()
+            if record.get("Building"):
+                records.append(record)
     return records
 
 
-def _find_table(content):
+def _find_tables(content):
+    """Every table in the source that has BC's own distinctive header row
+    somewhere in it — not just the first. Same class of gap as
+    extraction.rules.grid's own multi-table fix (2026-07): a long table
+    can get split across multiple page-tables by pdfplumber, each with
+    its own copy of the header row, and returning only the first would
+    silently drop every row on any table after it. Only one table exists
+    in the real BC fixture this rule was built for (confirmed directly),
+    so this hasn't been observed to actually drop a real BC row yet —
+    fixed defensively anyway, since the "never more than one matching
+    table" assumption was never actually verified and grid.py's own
+    identical assumption turned out to be wrong for a real source (Kitt's
+    own PDF: 38 of 57 real rows were silently dropped before that fix)."""
+    found = []
     for table in content.get("tables", []):
         for i, row in enumerate(table):
             lowered_cells = [(c or "").lower() for c in row]
-            if not all(any(signal in cell for cell in lowered_cells) for signal in _REQUIRED_SIGNALS):
-                continue
-            return i, _map_columns(row), table
-    return None
+            if all(any(signal in cell for cell in lowered_cells) for signal in _REQUIRED_SIGNALS):
+                found.append((i, _map_columns(row), table))
+                break  # this table's header is found — move to the next table
+    return found
 
 
 def _map_columns(header):
