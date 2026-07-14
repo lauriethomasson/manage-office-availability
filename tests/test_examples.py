@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from extraction.file_readers import read_file
 from extraction.rules import try_rules
 from extraction.schema import normalize_record, street_address_only, names_only
+from extraction import geocode as geocode_module
 from extraction import pdf_images
 import app as app_module
 
@@ -55,7 +56,17 @@ def check_metspace_floor_plans(failures):
     rather than a vague ">0" check, so a future regression (e.g. someone
     "fixing" the html_items image filter, or re-flipping the direction,
     and breaking this again) fails loudly here instead of only being
-    caught by manually spot-checking a spreadsheet later."""
+    caught by manually spot-checking a spreadsheet later.
+
+    Also pins Brochure PDF (2026-07 audit): each building name in this
+    source is itself the hyperlink to a real, listing-specific brochure
+    (confirmed by actually following one — a Mailchimp click-tracking
+    redirect that 302s to a Google Drive file literally titled "9-10
+    Market Place - 2nd Floor") — reuses the exact same matched-link
+    position that Floor Plan's own image lookup already relies on, so
+    this also guards against that position tracking regressing (all 14
+    rows, including the 5 same-building "141 Fenchurch Street (Monument)"
+    floors, must each get their own distinct link, not a neighbour's)."""
     filename = "Fw_ MetSpace Availability Update.eml"
     path = ROOT / filename
     if not path.exists():
@@ -96,8 +107,34 @@ def check_metspace_floor_plans(failures):
             f"floor plan, not a photo), got {high_res_count}/{len(records)} populated"
         )
 
-    if floor_plan_count == 14 and distinct_floor_plans == 14 and high_res_count == 0:
-        print(f"OK  {filename}: Floor Plan populated with {distinct_floor_plans} distinct URLs for all {len(records)} rows, High Res Images correctly blank")
+    brochure_count = sum(1 for r in records if (r.get("Brochure PDF") or "").strip())
+    distinct_brochures = len({r["Brochure PDF"] for r in records if (r.get("Brochure PDF") or "").strip()})
+    if brochure_count != 14:
+        failures.append(
+            f"{filename}: expected all 14 records to have a real Brochure PDF URL, got {brochure_count}/{len(records)} "
+            "— MetSpace's brochure-link extraction may be broken"
+        )
+    if distinct_brochures != brochure_count:
+        failures.append(
+            f"{filename}: expected every populated Brochure PDF to be distinct, got only {distinct_brochures} distinct "
+            f"URLs across {brochure_count} populated rows — a listing may be getting a neighbour's brochure link"
+        )
+    by_building_floor = {(r.get("Building"), r.get("Floor/Unit")): r.get("Brochure PDF") for r in records}
+    expected_brochure = {
+        ("9-10 Market Place", ""): "https://us.list-manage.com/Q6gnhZazI8v?e=095cb98613&c2id=a206dcecbc185bd9a5d5a46b47a3996f",
+        ("141 Fenchurch Street (Monument)", "G Floor"): "https://us.list-manage.com/WrtQM3D1UAI?e=095cb98613&c2id=a206dcecbc185bd9a5d5a46b47a3996f",
+        ("141 Fenchurch Street (Monument)", "7th Floor"): "https://us.list-manage.com/1Cu5cqfBviI?e=095cb98613&c2id=a206dcecbc185bd9a5d5a46b47a3996f",
+    }
+    for key, expected_url in expected_brochure.items():
+        actual = by_building_floor.get(key)
+        if actual != expected_url:
+            failures.append(f"{filename}: {key} expected Brochure PDF {expected_url!r}, got {actual!r}")
+
+    if floor_plan_count == 14 and distinct_floor_plans == 14 and high_res_count == 0 and brochure_count == 14 and distinct_brochures == 14:
+        print(
+            f"OK  {filename}: Floor Plan and Brochure PDF each populated with {distinct_floor_plans}/{distinct_brochures} "
+            f"distinct URLs for all {len(records)} rows, High Res Images correctly blank"
+        )
 
 
 def check_gpe_high_res_images(failures):
@@ -604,6 +641,53 @@ def check_names_only(failures):
     failures.extend(local_failures)
 
 
+def check_geocode_same_building_ambiguity(failures):
+    """Targeted regression test for extraction.geocode._check_ambiguity's
+    SAME_BUILDING_DISTANCE_KM check — a 2026-07 MetSpace audit found real,
+    independently cross-checked wrong postcodes for two buildings ("9-10
+    Market Place" showed W1W 8AE, really W1W 8AQ per Savills/CBRE/
+    Workthere/Hubble/Rightmove; "1 Curtain Road" showed EC2A 3NY, really
+    EC2A 3JX per a direct commercial listing) caused by a single Nominatim
+    query returning two genuinely different OSM nodes — one per unit/
+    entrance of the SAME building (an office node and a restaurant/bar
+    node) — just a few metres apart with different postcodes, which the
+    existing far-apart AMBIGUITY_DISTANCE_KM check (built for a
+    completely different failure mode — Nominatim returning a confident
+    match many km away in an unrelated borough) can't catch at all.
+    Pure-function unit test (no live network needed) against the real
+    coordinates/postcodes Nominatim actually returned for both cases,
+    plus a close-same-postcode case (must NOT trip) and a far-apart case
+    (must still trip the original, unrelated check)."""
+    cases = [
+        # Real case: "9-10 Market Place" — office node vs. restaurant node
+        # ~1m apart, different postcodes. Must be flagged ambiguous.
+        (51.5164430, -0.1402766, "W1W 8AE", [(51.5164451, -0.1402630, "W1W 8AQ")], True),
+        # Real case: "1 Curtain Road" — office node vs. bar node ~5m apart,
+        # different postcodes. Must be flagged ambiguous.
+        (51.5221940, -0.0811526, "EC2A 3NY", [(51.5221450, -0.0811478, "EC2A 3JX")], True),
+        # Close candidates that agree on postcode — same building, no real
+        # conflict — must NOT be flagged.
+        (51.5164430, -0.1402766, "W1W 8AE", [(51.5164451, -0.1402630, "W1W 8AE")], False),
+        # Far apart (the original, unrelated failure mode) — must still trip.
+        (51.5127184, -0.1412715, "W1S 2YZ", [(51.4, -0.3, "N9 0AA")], True),
+        # Close candidates where the second has no postcode at all —
+        # nothing to disagree with, must NOT be flagged.
+        (51.5164430, -0.1402766, "W1W 8AE", [(51.5164451, -0.1402630, "")], False),
+    ]
+    local_failures = []
+    for lat, lng, postcode, other_candidates, expect_ambiguous in cases:
+        error = geocode_module._check_ambiguity(lat, lng, postcode, other_candidates)
+        is_ambiguous = error is not None
+        if is_ambiguous != expect_ambiguous:
+            local_failures.append(
+                f"_check_ambiguity({lat}, {lng}, {postcode!r}, {other_candidates}) expected "
+                f"ambiguous={expect_ambiguous}, got ambiguous={is_ambiguous} (error={error!r})"
+            )
+    if not local_failures:
+        print(f"OK  geocode same-building ambiguity: {len(cases)} cases (2 real, cross-checked) spot-checked")
+    failures.extend(local_failures)
+
+
 def check_contacts_include_phone_email(failures):
     """Targeted regression test for a class of gap a 2026-07 audit found
     across MetSpace, GPE, and Breezblok, prompted by Knotel's own earlier
@@ -990,6 +1074,7 @@ def main():
     check_knotel_records(failures)
     check_street_address_only(failures)
     check_names_only(failures)
+    check_geocode_same_building_ambiguity(failures)
     check_contacts_include_phone_email(failures)
     check_bc_records(failures)
     check_breezblok_records(failures)

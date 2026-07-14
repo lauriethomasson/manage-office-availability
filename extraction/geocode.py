@@ -33,6 +33,30 @@ REQUEST_TIMEOUT = 10
 CANDIDATE_LIMIT = 3
 AMBIGUITY_DISTANCE_KM = 5.0
 
+# A DIFFERENT, closer-in ambiguity confirmed empirically (2026-07, MetSpace
+# audit) that the distance check above can't catch at all: a single real
+# building can have two separate OSM nodes just a few metres apart — one
+# per distinct unit/entrance (e.g. an upstairs office vs. a ground-floor
+# restaurant/bar sharing the same building) — each carrying a genuinely
+# different postcode. Nominatim doesn't flag this either; it just returns
+# whichever one it ranks first, with no signal that the two are actually
+# different, unrelated postcodes for the same address. Confirmed on two
+# real, independently cross-checked cases: "9-10 Market Place, London, UK"
+# returned an "office"-classed node at W1W 8AE as its top result, but every
+# real commercial listing for this exact office (Savills, CBRE, Workthere,
+# Hubble, Rightmove) gives W1W 8AQ — the second candidate, a "restaurant"-
+# classed node only ~1m away; "1 Curtain Road, London, UK" returned an
+# "office"-classed node at EC2A 3NY, but the real listing gives EC2A 3JX —
+# the second candidate, a "bar"-classed node ~5m away. Both real cases
+# had candidates within single-digit metres of each other, so this uses a
+# much tighter threshold than AMBIGUITY_DISTANCE_KM specifically to avoid
+# flagging the normal, expected case of nearby-but-genuinely-different
+# addresses a block or two apart (which legitimately do have different
+# postcodes without being "the same building"). "Office"-classed results
+# are not preferred over other classes here — that heuristic is exactly
+# what produced the wrong answer both times.
+SAME_BUILDING_DISTANCE_KM = 0.03
+
 CACHE_PATH = Path(__file__).resolve().parent.parent / ".geocode_cache.json"
 
 _cache = None
@@ -124,24 +148,55 @@ def _fetch(address):
     except (KeyError, ValueError, TypeError) as e:
         return None, None, "", f"Unexpected geocoding response shape: {e}"
 
+    postcode = extract_postcode((results[0].get("address") or {}).get("postcode", ""))
+
+    other_candidates = []
     for other in results[1:]:
         try:
             other_lat, other_lng = float(other["lat"]), float(other["lon"])
         except (KeyError, ValueError, TypeError):
             continue
+        other_postcode = extract_postcode((other.get("address") or {}).get("postcode", ""))
+        other_candidates.append((other_lat, other_lng, other_postcode))
+
+    ambiguity_error = _check_ambiguity(lat, lng, postcode, other_candidates)
+    if ambiguity_error:
+        # Treated the same as "no match" (not a distinct return shape) so
+        # it falls through to whatever fallback the caller already has —
+        # Needs manual lookup, or a further tier for a bare-name lookup —
+        # instead of silently trusting a coincidental match.
+        return None, None, "", ambiguity_error
+
+    return lat, lng, postcode, None
+
+
+def _check_ambiguity(lat, lng, postcode, other_candidates):
+    """Pure logic behind _fetch's own ambiguity checks, split out so it can
+    be unit-tested directly against synthetic candidate lists rather than
+    live Nominatim responses. other_candidates is [(lat, lng, postcode),
+    ...] for every result after the top one. Returns an error message
+    string if either check trips, else None."""
+    for other_lat, other_lng, other_postcode in other_candidates:
         distance = _distance_km(lat, lng, other_lat, other_lng)
         if distance > AMBIGUITY_DISTANCE_KM:
-            # Treated the same as "no match" (not a distinct return shape)
-            # so it falls through to whatever fallback the caller already
-            # has — Needs manual lookup, or a further tier for a bare-name
-            # lookup — instead of silently trusting a coincidental match.
-            return None, None, "", (
+            return (
                 f"Ambiguous match: top result is {distance:.1f}km from another plausible "
                 f"candidate for this same address — not confident enough to trust"
             )
-
-    postcode = extract_postcode((results[0].get("address") or {}).get("postcode", ""))
-    return lat, lng, postcode, None
+        if distance <= SAME_BUILDING_DISTANCE_KM:
+            # See SAME_BUILDING_DISTANCE_KM's own comment — two candidates
+            # this close are almost certainly two units/entrances of the
+            # SAME building, so a different postcode between them is a
+            # genuine, confirmed real-world conflict (not two candidates
+            # merely resolving to the same rounded coordinate), not a
+            # coincidence to shrug off.
+            if other_postcode and postcode and other_postcode != postcode:
+                return (
+                    f"Ambiguous match: top result ({postcode}) and another candidate only "
+                    f"{distance*1000:.0f}m away ({other_postcode}) disagree on postcode for what's "
+                    "almost certainly the same building — not confident enough to trust either"
+                )
+    return None
 
 
 def _distance_km(lat1, lon1, lat2, lon2):

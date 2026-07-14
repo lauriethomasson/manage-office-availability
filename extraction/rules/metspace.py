@@ -102,6 +102,18 @@ def _attach_floor_plans(records, html_items):
     convention, so this filters by source domain and excludes the "Logo"-
     alt company logo instead).
 
+    Also fills Brochure PDF from that same matched link's own href — each
+    building name in this source (e.g. "9-10 Market Place") is itself the
+    hyperlink, not a separate "View Brochure"-style button the way Knotel's
+    are. The href is a Mailchimp click-tracking redirect
+    (us.list-manage.com/...), not a direct PDF URL — confirmed (2026-07)
+    by actually following one all the way through: it 302s to a Google
+    Drive file literally titled "9-10 Market Place - 2nd Floor", a real,
+    listing-specific brochure. Kept as the tracking URL as extracted
+    (not resolved to the final Drive link) — it works identically when
+    clicked, and resolving it here would mean an extra network request
+    per listing during extraction.
+
     Confirmed by actually viewing several of these images that every one
     is a floor plan diagram, not a building photo. Goes into Floor Plan,
     not High Res Images, for that reason; High Res Images is deliberately
@@ -142,6 +154,8 @@ def _attach_floor_plans(records, html_items):
             # case, even when it's clearly the same listing.
             text_l, building_l = text.lower(), building.lower()
             if building and (text_l == building_l or text_l.startswith(building_l) or building_l in text_l):
+                if b:
+                    records[idx]["Brochure PDF"] = b
                 j = i + 1
                 while j < n:
                     kind2, a2, b2 = html_items[j]
