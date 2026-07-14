@@ -37,6 +37,27 @@ def detect(content):
     return any("knotel.com" in href.lower() for _, href in content.get("links", []))
 
 
+def _combine_name_and_address(name, address):
+    """Knotel's own marketing name for a building (e.g. "Hallmark", "15
+    Hatfields") often differs from its real registered address (e.g. "The
+    Hallmark Building, 106 Fenchurch St, London EC3M 5JE", "Chadwick
+    Court, London SE1 8DJ") — sometimes the name is already embedded in
+    the address text ("Classic House" is literally the start of "Classic
+    House, 174-180 Martha's Buildings..."), sometimes not at all ("Gilray
+    House" never appears in "146-150 City Rd, London EC1V 2RL"). The real
+    address is the only thing with the postcode this app's geocoding
+    needs — extraction.schema.normalize_record reads Property Address 1/
+    Postcode straight from this Building field — so it's always kept;
+    the marketing name is only prepended when the address doesn't already
+    mention it, so the output stays recognizable without a redundant
+    duplicate name."""
+    if not address:
+        return name
+    if name and name.lower() not in address.lower():
+        return f"{name}, {address}"
+    return address
+
+
 def parse(content):
     lines = [l.strip() for l in content["text"].split("\n") if l.strip()]
     link_groups = _group_items(content.get("html_items", []))
@@ -62,9 +83,36 @@ def parse(content):
 
         if line == "Available" or line.startswith("Available from"):
             # Optionally preceded (immediately, before this Available block)
-            # by a fresh "building name" + "address" pair.
-            if i >= 2 and POSTCODE_HINT_RE.search(lines[i - 1]) and not lines[i - 2].startswith("Available"):
-                current_building = lines[i - 2]
+            # by a fresh "building name" + "address" pair. Confirmed
+            # (2026-07, a real Render regression against a live Knotel
+            # email) that gating this on POSTCODE_HINT_RE matching the
+            # address line — the previous approach — silently fails
+            # whenever a building's own address only carries a partial/
+            # outward-only postcode with no inward part at all, e.g.
+            # "Market Exchange" at "8 Macklin Street, Covent Garden WC2":
+            # current_building then never updates away from whatever
+            # building preceded it ("33 Soho" in that real case), and the
+            # real address+postcode text is discarded entirely — the
+            # bare building name from lines[i - 2] was all that ever got
+            # kept, which is exactly why every Knotel record's postcode
+            # was silently coming out blank. Instead, rely on the
+            # layout's own structural invariant (see this module's
+            # docstring): a genuinely fresh building's address line
+            # repeats verbatim 3 lines later (after "London" and the
+            # floor descriptor), whereas a later floor of the *same*
+            # building has no fresh name/address before "Available" at
+            # all — lines[i - 1] there is the previous floor's own last
+            # price line, which never equals lines[i + 3]. This holds
+            # regardless of whether the postcode is full, partial, or
+            # embedded oddly, so it can't be fooled by a postcode-shape
+            # false negative the way the old gate was.
+            if (
+                i >= 2
+                and i + 3 < n
+                and lines[i - 1] == lines[i + 3]
+                and not lines[i - 2].startswith("Available")
+            ):
+                current_building = _combine_name_and_address(lines[i - 2], lines[i - 1])
 
             floor = lines[i + 2] if i + 2 < n else ""
 

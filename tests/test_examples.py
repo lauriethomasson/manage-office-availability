@@ -20,6 +20,7 @@ import app as app_module
 
 EXPECTATIONS = [
     ("Fw_ Knotel Availability _ 30_06_2026.eml", "Knotel", 16),
+    ("Fw_ Knotel Availability _ 13_07_2026.eml", "Knotel", 15),
     ("Fw_ MetSpace Availability Update.eml", "MetSpace", 14),
     ("Fw_ The latest GPE Fully Managed availability – workspaces you won't want to miss..eml", "GPE", 15),
     ("Kitt's Availability (External) - Live Availability.pdf", "Grid/Tabular", 19),
@@ -218,6 +219,132 @@ def check_gpe_high_res_images(failures):
             f"{len(candidates_by_building)} buildings ({len(records)} rows, {len(distinct_photos)} distinct photos), "
             "Floor Plan correctly blank"
         )
+
+
+def check_knotel_records(failures):
+    """Targeted regression test for extraction.rules.knotel, pinning known-
+    correct Building text — including the real postcode — directly from
+    the raw source text of both example emails. Not just "is a postcode
+    present" but "is it the RIGHT one": a real, shipped regression had
+    every Knotel row's Building silently reduced to just the bare
+    marketing name (e.g. "Hallmark", "Gilray House") with the source's own
+    real full-street-address-plus-postcode line discarded entirely, even
+    though the earlier "min record count" check in EXPECTATIONS above kept
+    passing the whole time (right count, wrong content) — confirmed
+    against a real live email where the source genuinely has a full
+    address for every single listing, so this rule should never need to
+    fall back to bare-name geocoding at all.
+
+    Also guards against a second, sharper bug from the same root cause:
+    the old "is this a fresh building" gate required the address line to
+    contain a full two-part postcode, which silently failed for a
+    building whose address only carries a partial/outward-only postcode
+    ("Market Exchange" at "8 Macklin Street, Covent Garden WC2", no inward
+    code) — current_building then never updated away from the previous
+    building ("33 Soho"), so that floor was attributed to entirely the
+    wrong building. A naive count or "Building is non-empty" check can't
+    catch this (both buildings' rows were still "populated", just with
+    one of them wrong) — checking by Floor/Unit (a stable per-row
+    identifier the source itself provides) against the expected Building
+    catches it directly, the same way check_gpe_high_res_images above
+    catches a photo misattributed to the *next* building instead of a
+    missing one."""
+    # Pinned by list index — parse() order is deterministic for a fixed,
+    # checked-in source file, and several of these buildings share the
+    # same Area and Floor/Unit label as each other (e.g. three different
+    # City Fringe buildings each have a plain "2nd Floor" listing), so
+    # index position is a more reliable identifier here than either field
+    # alone. Only the indices relevant to the reported regression are
+    # pinned, not all 16/15 rows.
+    checks = [
+        (
+            "Fw_ Knotel Availability _ 30_06_2026.eml",
+            16,
+            {
+                2: ("The Hallmark Building, 106 Fenchurch St, London EC3M 5JE", "Hallmark 6th Floor", "EC3M 5JE"),
+                4: (
+                    "Classic House, 174-180 Martha's Buildings, Old St, London EC1V 9BP",
+                    "2nd Floor",
+                    "EC1V 9BP",
+                ),
+                5: ("Gilray House, 146-150 City Rd, London EC1V 2RL", "3rd Floor", "EC1V 2RL"),
+                6: ("Gilray House, 146-150 City Rd, London EC1V 2RL", "4th Floor", "EC1V 2RL"),
+                7: ("Rufus House, 2-4 Rufus St, London N1 6PE", "2nd Floor", "N1 6PE"),
+                11: ("7 Howick Place, 7 Howick Pl, London SW1P 1BB", "3rd Floor", "SW1P 1BB"),
+                14: ("Market Exchange, 8 Macklin Street, Covent Garden WC2", "2nd - East Wing", ""),
+            },
+        ),
+        (
+            "Fw_ Knotel Availability _ 13_07_2026.eml",
+            15,
+            {
+                # The exact regression case: two adjacent West End listings
+                # with genuinely different buildings — "33 Soho" must not
+                # leak onto the "Market Exchange" row that follows it.
+                13: ("33 soho square, W1D 3QU", "2nd Floor", "W1D 3QU"),
+                14: (
+                    "Market Exchange, 8 Macklin Street, Covent Garden WC2",
+                    "2nd - East Wing",
+                    # This building's own address only ever gives a partial,
+                    # outward-only postcode ("WC2", no inward part) — "" is
+                    # the honest, correct extraction here, not a bug.
+                    "",
+                ),
+            },
+        ),
+    ]
+
+    for filename, expected_count, expected_by_index in checks:
+        path = ROOT / filename
+        if not path.exists():
+            failures.append(f"{filename}: example file not found (expected at {path})")
+            continue
+
+        content = read_file(path)
+        rule_name, records = try_rules(content)
+        if rule_name != "Knotel" or not records:
+            failures.append(f"{filename}: expected rule 'Knotel' with records, got '{rule_name}'")
+            continue
+        if len(records) != expected_count:
+            failures.append(f"{filename}: expected {expected_count} records, got {len(records)}")
+
+        normalized = [normalize_record(r) for r in records]
+        local_failures = []
+        for idx, (expected_building, expected_floor, expected_postcode) in expected_by_index.items():
+            if idx >= len(normalized):
+                local_failures.append(f"{filename}: expected a record at index {idx}, only {len(normalized)} present")
+                continue
+            row = normalized[idx]
+            if row["Floor/Unit"] != expected_floor:
+                local_failures.append(
+                    f"{filename}: record {idx} expected Floor/Unit {expected_floor!r}, got {row['Floor/Unit']!r} "
+                    "(fixture may have changed, or record ordering shifted)"
+                )
+            if row["Building"] != expected_building:
+                local_failures.append(
+                    f"{filename}: record {idx} ({expected_floor}) expected Building {expected_building!r}, got {row['Building']!r}"
+                )
+            if row["Property Postcode"] != expected_postcode:
+                local_failures.append(
+                    f"{filename}: record {idx} ({expected_floor}) expected Property Postcode {expected_postcode!r}, "
+                    f"got {row['Property Postcode']!r}"
+                )
+
+        # Knotel is a lettings-only source — it never sets a Sale Price
+        # signal (see extraction.schema.normalize_record), so For Sale
+        # must stay "No" for every row even when the email's own
+        # promotional copy mentions a price drop (confirmed against the
+        # real "** PRICE DROP AT 15 HATFIELDS **" banner in both example
+        # emails) — a promotional/discount mention is not a sale signal.
+        for_sale_values = {r["For Sale"] for r in normalized}
+        if for_sale_values != {"No"}:
+            local_failures.append(
+                f"{filename}: expected For Sale == 'No' for every row (lettings-only source), got {for_sale_values}"
+            )
+
+        if not local_failures:
+            print(f"OK  {filename}: {len(records)} Knotel records spot-checked against known-correct source values")
+        failures.extend(local_failures)
 
 
 def check_bc_records(failures):
@@ -512,6 +639,7 @@ def main():
 
     check_metspace_floor_plans(failures)
     check_gpe_high_res_images(failures)
+    check_knotel_records(failures)
     check_bc_records(failures)
     check_breezblok_records(failures)
     check_pdf_floorplan_vs_photos(
