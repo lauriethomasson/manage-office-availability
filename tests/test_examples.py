@@ -16,6 +16,7 @@ from extraction.file_readers import read_file
 from extraction.rules import try_rules
 from extraction.schema import normalize_record, street_address_only, names_only
 from extraction import geocode as geocode_module
+from extraction import html_images
 from extraction import pdf_images
 import app as app_module
 
@@ -688,6 +689,93 @@ def check_geocode_same_building_ambiguity(failures):
     failures.extend(local_failures)
 
 
+def check_html_images_for_llm_fallback(failures):
+    """Targeted regression test for extraction.html_images — the generic
+    Floor Plan/High Res Images/Brochure PDF enrichment for a brand-new
+    provider's .eml/.html source with no dedicated rule of its own (the
+    non-PDF counterpart to app.py's own _attach_pdf_images, which already
+    applied generically to any LLM-fallback PDF before this existed).
+
+    Confirmed real bug (2026-07): a brand-new provider (The Workplace
+    Company) went through the LLM fallback and came back with ALL of
+    Link to File, High Res Images, Floor Plan, and Brochure PDF empty —
+    Link to File turned out to already be fine (app.py always overwrites
+    it with the persisted source-file link regardless of source), but
+    the other three had genuinely NO enrichment step at all for a
+    non-PDF LLM-fallback source, despite the source having 4 real listing
+    photos and an explicit "Brochure" link.
+
+    This is a pure function-level check against html_items read directly
+    from the real source file (not a hand-written fixture) — no live
+    Gemini call needed, since extraction.html_images only ever consumes
+    html_items and a Building string, never re-derives them."""
+    filename = "Fw_ Property of The Week _ City Fringe.eml"
+    path = ROOT / filename
+    if not path.exists():
+        failures.append(f"{filename}: example file not found (expected at {path})")
+        return
+
+    content = read_file(path)
+    rule_name, rule_records = try_rules(content)
+    if rule_name is not None:
+        failures.append(
+            f"{filename}: expected no rule-based parser to match this brand-new provider (it must exercise "
+            f"the LLM fallback path this test targets), got rule '{rule_name}'"
+        )
+
+    items = content.get("html_items") or []
+    if not items:
+        failures.append(f"{filename}: expected non-empty html_items from this real .eml source, got none")
+        return
+
+    local_failures = []
+
+    # Real, known-correct classification for a representative sample of
+    # this source's own images/links — pins the specific alt/domain/
+    # extension signals confirmed against this real email, not just "some
+    # image got through".
+    real_photo_src = "https://gallery.eomail5.com/b2839f96-60af-11f0-9b87-8fe3b9c1184b%2F019f13c4-f173-70f1-b620-007e4f1fb3e0.jpg"
+    if not html_images.is_real_content_image("", real_photo_src):
+        local_failures.append(f"{filename}: expected a real listing photo (no alt, real gallery domain, .jpg) to be classified as real content")
+    for alt, src, reason in [
+        ("Company logo", "https://d36urhup7zbd7q.cloudfront.net/a/4bc2a91e.png", "alt contains 'logo'"),
+        ("Employee photo", "https://gifo.srv.wisestamp.com/img/abc.png", "wisestamp.com signature-service domain"),
+        ("linkedin social link", "https://gallery.eomail5.com/tentacles/icons/v1/social-block/rounded/color/linkedin.png", "alt contains 'social'"),
+        ("", "https://eot.theworkplacecompany.com/q/zm1J6qChR3mvXnogwjYaMw~~/AAAHURA", "no recognizable image extension (a tracking pixel)"),
+    ]:
+        if html_images.is_real_content_image(alt, src):
+            local_failures.append(f"{filename}: expected alt={alt!r} src={src!r} to be excluded ({reason}), but was classified as real content")
+
+    if not html_images.is_brochure_link("Brochure"):
+        local_failures.append(f"{filename}: expected a link literally named 'Brochure' to be classified as a brochure link")
+    if html_images.is_floorplan_link("Brochure"):
+        local_failures.append(f"{filename}: did not expect 'Brochure' to also be classified as a floor-plan link")
+
+    # End-to-end against the real html_items: simulate the two real
+    # records the LLM actually extracted from this file (both floors of
+    # the one real building, "5-7 Ireland Yard") and confirm the single-
+    # building tier attaches the real photos/brochure link to both.
+    records = [{"Building": "5-7 Ireland Yard"}, {"Building": "5-7 Ireland Yard"}]
+    html_images.enrich_records(records, items)
+    expected_brochure = (
+        "https://eot.theworkplacecompany.com/f/a/SjaePlQ3sgIFTBokxwTJWg~~/AAAHURA~/"
+        "6VqBvhnc5QlGQszomwEcqpzwgstqcSru4Kr4FwvfNNuDYDjmbdFz7r26trpdM3mbkpiSchIk3Qs5LCw-O3nIE8H8i2Mr0prK1Ni4"
+        "nbOMKPjTg7fUeLeEcd5srAl0t7HFMqfpPm31u39SpzUs7nPQ-GuvKaE2HsO_xIamqPbRe4uQ6lgeKkcvxZm3aBGd7Gvj"
+    )
+    for i, r in enumerate(records):
+        candidates = r.get("_high_res_candidates") or []
+        if len(candidates) != 4:
+            local_failures.append(f"{filename}: record {i} expected 4 real content image candidates, got {len(candidates)}: {candidates}")
+        if r.get("Brochure PDF") != expected_brochure:
+            local_failures.append(f"{filename}: record {i} expected Brochure PDF {expected_brochure!r}, got {r.get('Brochure PDF')!r}")
+        if r.get("Floor Plan"):
+            local_failures.append(f"{filename}: record {i} expected Floor Plan blank (no floor-plan-labeled link in this source), got {r.get('Floor Plan')!r}")
+
+    if not local_failures:
+        print(f"OK  {filename}: html_images classification and enrichment spot-checked against the real source file")
+    failures.extend(local_failures)
+
+
 def check_contacts_include_phone_email(failures):
     """Targeted regression test for a class of gap a 2026-07 audit found
     across MetSpace, GPE, and Breezblok, prompted by Knotel's own earlier
@@ -1075,6 +1163,7 @@ def main():
     check_street_address_only(failures)
     check_names_only(failures)
     check_geocode_same_building_ambiguity(failures)
+    check_html_images_for_llm_fallback(failures)
     check_contacts_include_phone_email(failures)
     check_bc_records(failures)
     check_breezblok_records(failures)

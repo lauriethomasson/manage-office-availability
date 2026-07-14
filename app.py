@@ -17,7 +17,7 @@ from flask import Flask, Response, abort, jsonify, render_template, request, sen
 load_dotenv()
 
 import storage
-from extraction import address_lookup, geocode as geocode_module, memlog, pdf_images
+from extraction import address_lookup, geocode as geocode_module, html_images, memlog, pdf_images
 from extraction.naming import make_unique_names
 from extraction.pipeline import process_files
 from spreadsheet import write_xlsx
@@ -284,6 +284,18 @@ def process():
                 memlog.log("before image extraction", r["filename"])
                 upload_jobs.extend(_attach_pdf_images(r["records"], source_path, r["pages_text"], batch_dir, batch_id, name))
                 memlog.log("after image extraction", r["filename"])
+            elif r["method"] == "llm" and r.get("html_items"):
+                # The non-PDF counterpart to the branch above: a brand-new
+                # provider's .eml/.html file with no dedicated rule yet
+                # (confirmed 2026-07 — The Workplace Company, the first
+                # real source seen through this path — previously got
+                # NONE of Floor Plan/High Res Images/Brochure PDF at all,
+                # despite the source genuinely having real listing photos
+                # and a "Brochure" link). Sets Floor Plan/Brochure PDF
+                # directly and stashes High Res Images candidates on
+                # "_high_res_candidates" for _finalize_high_res_images
+                # below, same convention as extraction.rules.gpe.
+                html_images.enrich_records(r["records"], r["html_items"])
 
             # Generic, source-agnostic finishing step: any rule (not just
             # PDF ones) can stash a list of real candidate photo URLs on a

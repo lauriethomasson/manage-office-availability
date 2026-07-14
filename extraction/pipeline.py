@@ -126,6 +126,7 @@ def process_files(paths):
             "date": None,
             "email_html": None,
             "pages_text": None,
+            "html_items": None,
         }
         memlog.log("before file parsing", filename)
         try:
@@ -167,6 +168,16 @@ def process_files(paths):
         # isn't a PDF (an .eml/table-based source has no "pages" concept).
         if path.suffix.lower() == ".pdf" and content.get("pages_text"):
             result["pages_text"] = content["pages_text"]
+
+        # The same (kind, text_or_alt, href_or_src) stream a rule like
+        # extraction.rules.knotel/metspace/gpe already reads directly from
+        # content — needed here too so app.py's generic Floor Plan/High
+        # Res Images/Brochure PDF enrichment for an .eml/.html source with
+        # NO dedicated rule (extraction.html_images) has the same raw
+        # material to work from. None for anything with no HTML structure
+        # at all (PDF/DOCX/XLSX/CSV).
+        if content.get("html_items"):
+            result["html_items"] = content["html_items"]
 
         rule_name, raw_records = try_rules(content)
         llm_source_name = None
