@@ -166,6 +166,7 @@ def process_files(paths, deadline=None):
             "email_html": None,
             "pages_text": None,
             "html_items": None,
+            "row_links": None,
         }
         memlog.log("before file parsing", filename)
         try:
@@ -217,6 +218,20 @@ def process_files(paths, deadline=None):
         # at all (PDF/DOCX/XLSX/CSV).
         if content.get("html_items"):
             result["html_items"] = content["html_items"]
+
+        # .xlsx/.xls only: real per-row hyperlink data (extraction.
+        # file_readers._extract_xlsx_row_links) that pandas' own cell-value
+        # read discards entirely — needed here so app.py's generic
+        # Brochure PDF/Floor Plan enrichment for a raw-spreadsheet source
+        # with no dedicated rule (extraction.xlsx_links) has real link
+        # data to work from. Confirmed real (2026-07, UNION): a source
+        # xlsx's own "Brochure" column links every row to a real
+        # brochure/floor-plan URL through a hyperlink on a generic display
+        # cell ("CLICK HERE"), never the URL as visible text — invisible
+        # to the LLM's own plain-text prompt input, built from those same
+        # pandas-read values.
+        if content.get("row_links"):
+            result["row_links"] = content["row_links"]
 
         rule_name, raw_records = try_rules(content)
         llm_source_name = None

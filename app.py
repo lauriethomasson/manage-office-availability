@@ -17,7 +17,7 @@ from flask import Flask, Response, abort, jsonify, render_template, request, sen
 load_dotenv()
 
 import storage
-from extraction import address_lookup, geocode as geocode_module, html_images, memlog, pdf_images
+from extraction import address_lookup, geocode as geocode_module, html_images, memlog, pdf_images, xlsx_links
 from extraction.naming import make_unique_names
 from extraction.pipeline import BATCH_DEADLINE_SECONDS, process_files
 from spreadsheet import write_xlsx
@@ -307,6 +307,17 @@ def process():
                 # "_high_res_candidates" for _finalize_high_res_images
                 # below, same convention as extraction.rules.gpe.
                 html_images.enrich_records(r["records"], r["html_items"])
+            elif r["method"] == "llm" and source_path.suffix.lower() in (".xlsx", ".xls") and r.get("row_links"):
+                # The .xlsx/.xls counterpart to the two branches above: a
+                # raw-spreadsheet source with no dedicated rule of its own
+                # (confirmed 2026-07 — a UNION file, the first one seen
+                # through this path — came back with Brochure PDF/Floor
+                # Plan blank for every row despite its own "Brochure"
+                # column linking every row to a real box.com URL; pandas'
+                # own cell-value read, used to build the LLM's own
+                # plain-text prompt input, discards hyperlinks entirely,
+                # so nothing in that text could ever have recovered it).
+                xlsx_links.enrich_records(r["records"], r["row_links"])
 
             # Generic, source-agnostic finishing step: any rule (not just
             # PDF ones) can stash a list of real candidate photo URLs on a

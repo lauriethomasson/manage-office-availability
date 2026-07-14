@@ -19,6 +19,7 @@ from extraction import geocode as geocode_module
 from extraction import html_images
 from extraction.llm_fallback import _build_prompt
 from extraction import pdf_images
+from extraction import xlsx_links
 from extraction import pipeline as pipeline_module
 import app as app_module
 import time
@@ -689,6 +690,82 @@ def check_geocode_same_building_ambiguity(failures):
             )
     if not local_failures:
         print(f"OK  geocode same-building ambiguity: {len(cases)} cases (2 real, cross-checked) spot-checked")
+    failures.extend(local_failures)
+
+
+def check_xlsx_links_for_llm_fallback(failures):
+    """Targeted regression test for extraction.xlsx_links — the generic
+    Brochure PDF/Floor Plan enrichment for a raw-spreadsheet (.xlsx/.xls)
+    source with no dedicated rule, going through the LLM fallback
+    instead (the .xlsx counterpart to extraction.html_images for .eml/
+    .html and app._attach_pdf_images for PDF).
+
+    Confirmed real bug (2026-07, a UNION .xlsx with no dedicated rule):
+    its own "Brochure" column links every row to a real box.com URL
+    through a hyperlink on a generic display cell — pandas' own
+    cell-value read (used to build the LLM's own plain-text prompt
+    input) discards hyperlinks entirely, so Brochure PDF/Floor Plan came
+    back blank for every row despite real links existing in the source.
+    Fixed by extraction.file_readers._extract_xlsx_row_links capturing
+    per-row hyperlinks directly via openpyxl, and this module matching
+    each extracted record back to its own source row by Building-name
+    search.
+
+    Also confirmed real (same file): a second bug in the FIX itself —
+    the actual source has "Nexus Place -  25 Farringdon Place" (two
+    spaces after the dash), but the LLM's own extracted Building field
+    normalizes that to a single space, so a naive substring check missed
+    this row's real link entirely, even though it existed. Row 4 below
+    pins that exact real case.
+
+    Pure function test against hand-built row_links shaped exactly like
+    extraction.file_readers._extract_xlsx_row_links' real output — no
+    live LLM/network call needed."""
+    row_links = [
+        {"row_text": "107 Cannon Street | 4th | Fitted | 2248", "links": [("CLICK HERE", "https://example.com/107-4th")]},
+        {"row_text": "107 Cannon Street | 1st | Fitted | 1900", "links": [("CLICK HERE", "https://example.com/107-1st")]},
+        {"row_text": "155 Fenchurch Street | 7th | CAT A | 3000", "links": [("FLOOR PLAN", "https://example.com/155-plan")]},
+        # Real case: a double space in the source ("-  25") that the LLM's
+        # own Building field normalizes to a single space ("- 25").
+        {"row_text": "Nexus Place -  25 Farringdon Place | 5th", "links": [("Landlord Brochure", "https://example.com/nexus")]},
+        # No hyperlink at all in this row — must be left alone, not error.
+        {"row_text": "100 Lower Thames Street | 5th | CAT A | 5178", "links": []},
+    ]
+    records = [
+        {"Building": "107 Cannon Street", "Floor/Unit": "4th", "Floor Plan": "", "Brochure PDF": ""},
+        {"Building": "107 Cannon Street", "Floor/Unit": "1st", "Floor Plan": "", "Brochure PDF": ""},
+        {"Building": "155 Fenchurch Street", "Floor/Unit": "7th", "Floor Plan": "", "Brochure PDF": ""},
+        {"Building": "Nexus Place - 25 Farringdon Place", "Floor/Unit": "5th", "Floor Plan": "", "Brochure PDF": ""},
+        {"Building": "100 Lower Thames Street", "Floor/Unit": "5th", "Floor Plan": "", "Brochure PDF": ""},
+    ]
+    xlsx_links.enrich_records(records, row_links)
+
+    local_failures = []
+    expected = [
+        ("Brochure PDF", "https://example.com/107-4th"),
+        ("Brochure PDF", "https://example.com/107-1st"),
+        ("Floor Plan", "https://example.com/155-plan"),
+        ("Brochure PDF", "https://example.com/nexus"),
+        (None, None),
+    ]
+    for record, (field, url) in zip(records, expected):
+        if field is None:
+            if record.get("Floor Plan") or record.get("Brochure PDF"):
+                local_failures.append(
+                    f"{record['Building']!r}: expected no Floor Plan/Brochure PDF (source row has no link), "
+                    f"got Floor Plan={record.get('Floor Plan')!r} Brochure PDF={record.get('Brochure PDF')!r}"
+                )
+            continue
+        if record.get(field) != url:
+            local_failures.append(f"{record['Building']!r} ({record['Floor/Unit']}): expected {field} {url!r}, got {record.get(field)!r}")
+        other_field = "Brochure PDF" if field == "Floor Plan" else "Floor Plan"
+        if record.get(other_field):
+            local_failures.append(
+                f"{record['Building']!r} ({record['Floor/Unit']}): expected {other_field} to stay blank, got {record.get(other_field)!r}"
+            )
+
+    if not local_failures:
+        print("OK  xlsx_links: 2 same-building rows each get their OWN link, a floor-plan link classified separately, a real double-space mismatch resolved, a linkless row left blank")
     failures.extend(local_failures)
 
 
@@ -1592,6 +1669,7 @@ def main():
     check_geocode_same_building_ambiguity(failures)
     check_source_filename_disambiguation(failures)
     check_html_images_for_llm_fallback(failures)
+    check_xlsx_links_for_llm_fallback(failures)
     check_llm_prompt_handles_ranges_and_price_tiers(failures)
     check_derived_postcode_always_flagged(failures)
     check_batch_deadline_stops_remaining_lookups(failures)

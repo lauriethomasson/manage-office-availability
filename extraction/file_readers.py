@@ -5,6 +5,10 @@ Each reader returns a dict with at least:
   html  - raw HTML string, when the source is HTML/eml (for link-aware rules)
   links - list of (visible_text, href) tuples in document order, when available
   tables - list of tables, each a list of rows, each row a list of cell strings
+  row_links - .xlsx/.xls only: list of {"row_text", "links"} per source row
+    that has a real hyperlink (see _extract_xlsx_row_links) — pandas'
+    own cell-value read (used for text/tables above) discards hyperlinks
+    entirely, so this is the only place they're recoverable at all
 
 Readers raise ValueError with a human-readable message on failure — the
 caller (pipeline) turns that into a per-file error in the results summary
@@ -74,6 +78,7 @@ def _empty(**overrides):
         "file_date": None,
         "pages_text": [],
         "size_warning": None,
+        "row_links": [],
     }
     base.update(overrides)
     return base
@@ -229,7 +234,58 @@ def _read_xlsx(path):
 
     if not tables or all(len(t) <= 1 for t in tables):
         raise ValueError("Spreadsheet appears to have no data rows")
-    return _empty(text="\n".join(text_parts), tables=tables)
+
+    # Best-effort: real per-row hyperlink data pandas discards entirely
+    # (see _extract_xlsx_row_links's own docstring) but isn't essential to
+    # basic extraction — a workbook openpyxl can't open for any reason
+    # (corruption, an unusual format variant) shouldn't fail the whole
+    # file when pandas already read it successfully above.
+    try:
+        row_links = _extract_xlsx_row_links(path)
+    except Exception:
+        row_links = []
+
+    return _empty(text="\n".join(text_parts), tables=tables, row_links=row_links)
+
+
+def _extract_xlsx_row_links(path):
+    """Returns a list of {"row_text": str, "links": [(display_text, url), ...]}
+    — one entry per source row with at least one real hyperlink, across
+    every sheet, in workbook order.
+
+    pandas.read_excel above (used for text/tables) reads cell VALUES only
+    and silently discards hyperlinks entirely. Confirmed via a real UNION
+    source (2026-07): its own "Brochure" column links every row to a real
+    box.com brochure/floor-plan URL through a hyperlink on a generic
+    "CLICK HERE"/"Landlord Brochure"/"FLOOR PLAN" display cell, never the
+    URL itself as visible text — so nothing in the LLM's own plain-text
+    prompt input (built from exactly the same pandas-read values) could
+    ever recover it, and Brochure PDF/Floor Plan came back blank for
+    every row despite real links existing in the source.
+
+    row_text mirrors the same row's own dumped text (the " | "-joined
+    cell values already used for the LLM's text input above) so a later
+    enrichment step (extraction.xlsx_links) can match it back to a
+    specific extracted listing by Building-name substring search — the
+    same matching principle already used for a PDF (extraction.
+    pdf_images, matched by page) or an .eml (extraction.html_images,
+    matched by alt text), just keyed by row here instead."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, data_only=True)
+    row_links = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            links = [
+                (str(cell.value).strip() if cell.value is not None else "", cell.hyperlink.target)
+                for cell in row
+                if cell.hyperlink is not None and cell.hyperlink.target
+            ]
+            if not links:
+                continue
+            row_text = " | ".join(str(cell.value) for cell in row if cell.value not in (None, ""))
+            row_links.append({"row_text": row_text, "links": links})
+    return row_links
 
 
 def _read_csv(path):
